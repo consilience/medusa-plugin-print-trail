@@ -19,10 +19,6 @@ The order page: each Print Trail fulfilment with its tracking, and the order's P
 
 Settings → Print Trail: the connection and the webhook.
 
-![The Print Trail shipping page: three rate-card shipping options with their Print Trail methods and weight bands, the Europe option with its own bands for Ireland](media/shipping-rate-cards.png)
-
-Print Trail shipping: options priced by weight band, here with Ireland's own bands.
-
 ## Requirements
 
 - Medusa `^2.17.2`, tested on 2.17.2 and 2.22.1.
@@ -101,7 +97,7 @@ They create the plugin's tables and its link to orders. Then start Medusa, or re
 
 1. Go to Settings → Print Trail and press **Test connection**. It checks the token and channel, registers the store's webhook with Print Trail and fetches the webhook secret.
 2. Put the products Print Trail fulfils in a shipping profile of their own.
-3. On Settings → Print Trail, follow the **Print Trail shipping options** link and create a Print Trail shipping option in a service zone, for that profile, with a Print Trail method and weight bands. Its fulfilment set must be linked to a stock location.
+3. On Settings → Print Trail, follow the **Print Trail shipping options** link and create a Print Trail shipping option for that profile, in a service zone whose fulfilment set is linked to a stock location.
 
 Variants are matched to Print Trail by SKU. Where Print Trail's SKU differs, set it in the Print Trail panel on the variant page.
 
