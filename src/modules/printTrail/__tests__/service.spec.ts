@@ -270,6 +270,24 @@ moduleIntegrationTestRunner<PrintTrailModuleService>({
           expect(await service.listPrintTrailVariants({ variant_id: ["var_f1", "var_f2", "var_f3"] }, { withDeleted: true })).toHaveLength(0)
         })
 
+        it("lists the SKUs a variant's or a product's rows were checked with", async () => {
+          for (const [variantId, productId, sku] of [["var_k1", "prod_k1", "K-1"], ["var_k2", "prod_k1", "k-1"], ["var_k3", "prod_k1", "K-2"], ["var_k4", "prod_k2", "K-3"]]) {
+            await service.writeVariantCheck({ variantId, productId, check: check(sku, "not-found"), source: "sku-check" })
+          }
+          await service.writeVariantCheck({ variantId: "var_k5", productId: "prod_k1", check: null, source: "stock-sync" })
+          expect((await service.checkSkusOf({ productIds: ["prod_k1"] })).sort()).toEqual(["K-1", "K-2"])
+          expect(await service.checkSkusOf({ variantIds: ["var_k4", "var_none"] })).toEqual(["K-3"])
+          expect(await service.checkSkusOf({})).toEqual([])
+        })
+
+        it("finds the SKUs some row was checked with, whatever their case, and a SKU with _ or % only as itself", async () => {
+          for (const [variantId, sku] of [["var_u1", "Book_1"], ["var_u2", "BOOKX1"], ["var_u3", "50-OFF"]]) {
+            await service.writeVariantCheck({ variantId, productId: "prod_u", check: check(sku, "not-found"), source: "sku-check" })
+          }
+          expect(await service.checkedSkus(["BOOK_1", " book_1 ", "BOOKY1", "50%-off", "50-off", "absent", ""])).toEqual(["BOOK_1", " book_1 ", "50-off"])
+          expect(await service.checkedSkus([])).toEqual([])
+        })
+
         it("lists the distinct not-found SKUs", async () => {
           await service.writeVariantCheck({ variantId: "var_n1", productId: "prod_n", check: check("MISSING-1", "not-found"), source: "sku-check" })
           await service.writeVariantCheck({ variantId: "var_n2", productId: "prod_n", check: check("missing-1", "not-found"), source: "sku-check" })

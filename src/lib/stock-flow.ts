@@ -434,6 +434,43 @@ export async function runLegacyMetadataScan(
   })
 }
 
+// The stock lock's ttl for forgetUnmatchedSkus: one read and one write.
+export const UNMATCHED_FORGET_LOCK_TTL_SECONDS = 30
+// forgetUnmatchedSkus's waits between tries for the lock, each scaled by a
+// random 0.5 to 1.5: about a second and a half in all.
+export const UNMATCHED_FORGET_WAITS_MS = [100, 200, 300, 400, 500]
+
+// Forgets SKUs from the stock sync's unmatched_skus (a deleted variant's).
+// The stock sync writes that list under the stock lock, and a run holding it
+// would write back the list it worked out, so this takes the lock too. The
+// deletions of one request arrive together, each holding the lock for a
+// moment, so a held lock is tried again a few times; still held (a stock
+// sync running, or a lock that can't be taken), it is skipped ({ ran: false })
+// and the next full stock sync works the list out afresh. It never queues
+// for the lock, so a long stock sync delays it by those waits only. Returns
+// how many SKUs it forgot.
+export async function forgetUnmatchedSkus(
+  locking: Pick<ILockingModule, "acquire" | "release">,
+  state: StateStore,
+  skus: string[],
+  opts: { now?: () => Date; waitsMs?: number[] } = {}
+): Promise<{ ran: false } | { ran: true; forgotten: number }> {
+  if (!skus.length) return { ran: true, forgotten: 0 }
+  const waits = opts.waitsMs ?? UNMATCHED_FORGET_WAITS_MS
+  for (let attempt = 0; ; attempt++) {
+    const run = await withHeldLock(locking, STOCK_LOCK_KEY, UNMATCHED_FORGET_LOCK_TTL_SECONDS, async () => {
+      const current = (await state.getState<{ skus: string[] }>(STATE_KEYS.unmatched))?.skus ?? []
+      const next = mergeUnmatched(current, { forget: skus })
+      if (next.join("\n") === current.join("\n")) return 0
+      await state.setState(STATE_KEYS.unmatched, { skus: next, updatedAt: (opts.now ? opts.now() : new Date()).toISOString() })
+      return current.length - next.length
+    })
+    if (run.ran) return { ran: true, forgotten: run.result }
+    if (attempt >= waits.length) return { ran: false }
+    await new Promise((resolve) => setTimeout(resolve, waits[attempt] * (0.5 + Math.random())))
+  }
+}
+
 export const VARIANT_ROW_PAGE = 500
 
 // A trusted full run sees every Print Trail product: the SKU check of a

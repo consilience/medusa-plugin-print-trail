@@ -95,15 +95,50 @@ medusaIntegrationTestRunner({
       expect((await printTrail(container()).variantRows([first.id, second.id])).size).toBe(0)
 
       // A SKU the last stock sync also listed (Print Trail has no stock
-      // level for it) loses its check at once, and leaves the notice with the
-      // next full stock sync.
+      // level for it) leaves the stock sync's list as well, with no job run.
       expect((await printTrail(container()).getState("unmatched_skus")).skus).toContain(SKUS.unknownSku)
       await api.delete(`/admin/products/${await productOf(seed.variants.unknownSku)}/variants/${seed.variants.unknownSku}`, admin)
-      await waitFor(async () => (await printTrail(container()).variantRows([seed.variants.unknownSku])).size === 0, { what: "the check forgotten" })
+      await waitFor(async () => (await unmatched()).length === 0, { what: "the stock sync's unmatched SKU gone" })
+      expect((await printTrail(container()).variantRows([seed.variants.unknownSku])).size).toBe(0)
       expect(await printTrail(container()).notFoundSkus()).toEqual([])
+      expect((await printTrail(container()).getState("unmatched_skus")).skus).not.toContain(SKUS.unknownSku)
+      expect(await orderHealth()).toMatchObject({ unmatchedSkus: 0 })
+      // The next full stock sync agrees.
       await stockJob()
       expect(await unmatched()).toEqual([])
-      expect(await orderHealth()).toMatchObject({ unmatchedSkus: 0 })
+    })
+
+    // One request deleting several variants sends their events together, so
+    // each takes its turn at the stock lock.
+    it("variants deleted together all leave the stock sync's unmatched SKUs at once", async () => {
+      const skus = ["HAR-BATCH-1", "HAR-BATCH-2", "HAR-BATCH-3", "HAR-BATCH-4"]
+      const {
+        result: [batch],
+      } = await createProductsWorkflow(container()).run({
+        input: {
+          products: [
+            {
+              title: "Harness Book Batch",
+              handle: "harness-batch",
+              status: "published",
+              shipping_profile_id: seed.ptProfileId,
+              sales_channels: [{ id: seed.salesChannelId }],
+              options: [{ title: "Edition", values: skus }],
+              variants: skus.map((sku) => ({ title: sku, sku, options: { Edition: sku }, prices: [{ currency_code: "gbp", amount: 10 }] })),
+            },
+          ],
+        },
+      })
+      await settleSkuChecks(container())
+      await stockJob()
+      const stockList = async () => ((await printTrail(container()).getState("unmatched_skus")).skus as string[]).slice().sort()
+      expect(await stockList()).toEqual(expect.arrayContaining(skus))
+
+      const [kept, ...deleted] = batch.variants as any[]
+      await api.post(`/admin/products/${batch.id}/variants/batch`, { delete: deleted.map((v) => v.id) }, admin)
+      await waitFor(async () => (await stockList()).every((s) => s === kept.sku || !skus.includes(s)), { what: "the deleted variants' SKUs gone" })
+      expect(await stockList()).toEqual([kept.sku, SKUS.unknownSku].sort())
+      expect(await unmatched()).toEqual([kept.sku, SKUS.unknownSku].sort())
     })
 
     it("a full stock sync forgets a variant deleted without an event", async () => {

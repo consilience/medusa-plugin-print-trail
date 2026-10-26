@@ -26,6 +26,8 @@ type Logger = { warn(message: string): void }
 
 const SEEN_CHUNK = 500
 const VARIANT_ROW_CHUNK = 500
+// One ILIKE per SKU in a query.
+const SKU_LOOKUP_CHUNK = 100
 
 const chunks = <T>(items: T[], size: number): T[][] => {
   const out: T[][] = []
@@ -328,6 +330,42 @@ class PrintTrailModuleService extends MedusaService({
       }
     }
     return deleted
+  }
+
+  // The SKUs the rows of these variants, or of these products' variants,
+  // were checked with, once each.
+  async checkSkusOf(filter: { variantIds?: string[]; productIds?: string[] }): Promise<string[]> {
+    const out = new Map<string, string>()
+    const sets: [keyof VariantCheckRow, string[]][] = [
+      ["variant_id", filter.variantIds ?? []],
+      ["product_id", filter.productIds ?? []],
+    ]
+    for (const [column, values] of sets) {
+      for (const ids of chunks([...new Set(values)], VARIANT_ROW_CHUNK)) {
+        for (const r of await this.listPrintTrailVariants({ [column]: ids }, { select: ["check_sku"] })) {
+          const k = normaliseSku(r.check_sku)
+          if (k && !out.has(k)) out.set(k, r.check_sku!.trim())
+        }
+      }
+    }
+    return [...out.values()]
+  }
+
+  // Those of `skus` that some row was checked with, compared as Print Trail
+  // compares SKUs (normaliseSku): ILIKE finds the rows whatever their case,
+  // with the pattern's wildcards escaped.
+  async checkedSkus(skus: string[]): Promise<string[]> {
+    const wanted = [...new Set(skus.map(normaliseSku).filter(Boolean))]
+    const have = new Set<string>()
+    const literal = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`)
+    for (const keys of chunks(wanted, SKU_LOOKUP_CHUNK)) {
+      const rows = await this.listPrintTrailVariants(
+        { $or: keys.map((k) => ({ check_sku: { $ilike: literal(k) } })) },
+        { select: ["check_sku"] }
+      )
+      for (const r of rows) have.add(normaliseSku(r.check_sku))
+    }
+    return skus.filter((s) => have.has(normaliseSku(s)))
   }
 
   // The distinct SKUs whose check is not-found, for the unmatched notice.

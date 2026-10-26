@@ -21,7 +21,8 @@ export const STATE_KEYS = {
   watermark: "stock_watermark",
   pending: "stock_sync_pending",
   lastRun: "stock_last_run",
-  // Written only by the stock sync, under the stock lock.
+  // Written under the stock lock: by the stock sync, and by
+  // forgetUnmatchedSkus for a deleted variant's SKU.
   unmatched: "unmatched_skus",
   // 0.2.0's list of the SKU check's not-found results. Read-only since
   // 1.0.0 (the not-found checks are rows now): the SKU check only forgets

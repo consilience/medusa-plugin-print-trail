@@ -29,7 +29,7 @@ package uses [semantic versioning](https://semver.org/).
 
 ### Fixed
 
-- **The unmatched-SKU notice kept a deleted variant's SKU for good.** Deleting a variant or a product now deletes its SKU checks, and a full stock sync forgets any variant deleted without an event, or whose product has left the Print Trail shipping profiles. A SKU the last stock sync also found missing from Print Trail's stock list leaves the notice with the next full stock sync.
+- **The unmatched-SKU notice kept a deleted variant's SKU for good.** Deleting a variant or a product now deletes its SKU checks, and their SKUs leave the notice at once, from the last stock sync's list of SKUs missing from Print Trail's stock list too, unless another variant was checked with the same SKU. A full stock sync forgets any variant deleted without an event, or whose product has left the Print Trail shipping profiles. A deleted variant's SKU waits for the next full stock sync (or Sync stock now) when the variant was never checked, or when a stock sync was running as it was deleted.
 - **A variant's SKU check could stay stale**, Inactive or Not found after Print Trail had started listing the product, until the variant was saved again. The stock sync now brings it up to date (above).
 
 ## [0.2.0] - 2026-10-25
