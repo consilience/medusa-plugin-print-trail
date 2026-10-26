@@ -1,5 +1,6 @@
 import path from "node:path"
 import { medusaIntegrationTestRunner } from "@medusajs/test-utils"
+import { Modules } from "@medusajs/framework/utils"
 import { HARNESS, useMock } from "./harness"
 import { adminHeaders, type Headers } from "./helpers/admin"
 import { runJob } from "./helpers/jobs"
@@ -222,6 +223,29 @@ medusaIntegrationTestRunner({
         { ...admin, validateStatus: () => true }
       )
       expect(form.status).toBe(200)
+    })
+
+    it("Sync stock now runs a full stock sync, or defers it to the sweep while one is running", async () => {
+      const service = printTrail(container())
+      const { data: done } = await post("/stock-sync")
+      expect(done).toMatchObject({ status: "completed", summary: expect.stringMatching(/^\d+ levels updated, backorders /) })
+      expect((await get("/sku-health")).data.lastRun).toMatchObject({ trigger: "admin", error: null })
+
+      // Another run holds the stock lock.
+      const locking = container().resolve(Modules.LOCKING)
+      await locking.acquire("print-trail:stock", { ownerId: "harness", expire: 60 })
+      try {
+        const { data: deferred } = await post("/stock-sync")
+        expect(deferred).toEqual({ status: "deferred", summary: "deferred" })
+        expect(await service.getState("stock_sync_pending")).toMatchObject({ full: true, requestedAt: expect.any(String) })
+      } finally {
+        await locking.release("print-trail:stock", { ownerId: "harness" })
+      }
+
+      // The next sweep runs it.
+      await runJob(container(), "print-trail-sweep", utils.waitWorkflowExecutions)
+      expect(await service.getState("stock_last_run")).toMatchObject({ trigger: "pending", completedAt: expect.any(String) })
+      expect(await service.getState("stock_sync_pending")).toBeNull()
     })
   },
 })

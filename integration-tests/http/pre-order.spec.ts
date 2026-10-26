@@ -305,6 +305,25 @@ medusaIntegrationTestRunner({
       expect((await variantOf(seed.variants.preOrder)).preOrder).toBeUndefined()
     })
 
+    // The plugin's backorder write sets allow_backorder alone, so on Medusa
+    // 2.17-2.18, where an update replaces a variant's metadata, it keeps the
+    // store's keys and the pre-order flag.
+    it("turning a backorder on keeps the variant's metadata", async () => {
+      const { preOrder } = seed.variants
+      await printTrail(container()).setState("stock_backordered", { ids: [] })
+      await updateProductVariantsWorkflow(container()).run({
+        input: { product_variants: [{ id: preOrder, allow_backorder: false, metadata: { ...(await variantOf(preOrder)).metadata, store_key: "kept" } }] },
+      })
+      await settleSkuChecks(container())
+      expect(await variantOf(preOrder)).toMatchObject({ allowBackorder: false, preOrder: PRE_ORDER_DATE })
+
+      await stockJob()
+      const v = await variantOf(preOrder)
+      expect(v.allowBackorder).toBe(true)
+      expect(await reasonOf(preOrder)).toBe("pre-order")
+      expect(v.metadata).toMatchObject({ store_key: "kept", print_trail_pre_order: PRE_ORDER_DATE })
+    })
+
     it("a confirm into an out-of-stock back-order is attention, not a retry loop", async () => {
       mock().state.backorderWarehouse = true
       // Medusa can still sell one; Print Trail has none.

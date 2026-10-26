@@ -239,3 +239,9 @@ export async function settleSkuChecks(container: MedusaContainer, timeoutMs = 15
   // The drain's own writes (results, follow-ups) finish after the queue empties.
   await new Promise((r) => setTimeout(r, 500))
 }
+
+// Soft-deletes a variant in the database, with no workflow, so no
+// product-variant.deleted event fires: as a store's own script might.
+export async function softDeleteVariantQuietly(dbConnection: any, variantId: string): Promise<void> {
+  await dbConnection.raw(`update product_variant set deleted_at = now() where id = ?`, [variantId])
+}
