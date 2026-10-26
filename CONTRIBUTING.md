@@ -72,7 +72,7 @@ scripts/install-test.sh medusa-plugin-print-trail-<version>.tgz 2.22.1
 npm run checklist:staging -- --list                 # the scenarios
 npm run checklist:staging                           # staging; prompts when a person is needed
 npm run checklist:staging -- --non-interactive      # staging; steps that need a person are "manual"
-npm run checklist:staging -- --only send,dispatch   # some scenarios (or --skip)
+npm run checklist:staging -- --only send,cancel     # some scenarios (or --skip)
 npm run checklist:staging -- --mock                 # the bundled mock, unattended
 npm run checklist:staging -- --include preorder-release   # also the opt-in release scenario
 npm run checklist:staging -- --cleanup <run id>     # cancel what an earlier run left behind
@@ -88,7 +88,7 @@ It ends with a table and writes a JSON report to `scripts/staging-checklist/repo
 
 **`preorder-release` is opt-in** (`--include preorder-release`). Releasing makes the pre-order product active at Print Trail for good, so later runs have no pre-order SKU to test with.
 
-**Steps that need a person.** Against staging, someone does in the Print Trail app what a warehouse would: dispatch an order (all of it, or one fulfilment), change an order's status, cancel it there, or release a pre-order product. The script says what to do and polls Print Trail and the store until it shows, for up to `CHECKLIST_HUMAN_TIMEOUT` seconds (type `s` and Enter to skip the step). It also asks whether the emails arrived, and asks you to restart the store for the crash test. Webhooks must reach the store, so it needs a public `https` backend URL.
+**Steps that need a person.** Against staging, someone changes an order's status in the Print Trail app, cancels it there, or releases a pre-order product. Only a warehouse dispatches an order and adds its tracking, which the Print Trail staging app can't do, so against staging the scenarios that need a dispatch (`dispatch`, `two-parcel`, `cancel-too-late` and `preorder-mixed`) are skipped before they place any order; `--mock` covers them. When someone can dispatch on this Print Trail (all of an order, or one fulfilment), set `CHECKLIST_STAGING_DISPATCH=1` (or `true`) and they run, with the script asking for each dispatch. The script says what to do and polls Print Trail and the store until it shows, for up to `CHECKLIST_HUMAN_TIMEOUT` seconds (type `s` and Enter to skip the step). It also asks whether the emails arrived, and asks you to restart the store for the crash test, then waits up to `CHECKLIST_CRASH_TIMEOUT` seconds for the order to be confirmed (default 1500: a send the restart cut off is retried only once its lease, the plugin's 15-minute retry delay, has passed, by the next sweep). Webhooks must reach the store, so it needs a public `https` backend URL.
 
 With `--mock`, the script starts the bundled mock itself at `PT_STAGING_BASE_URL` (the store's `PRINT_TRAIL_BASE_URL`, so stop any mock already on that port) and does those steps through it, so the run needs nobody. Set `CHECKLIST_MOCK_WEBHOOK_SECRET` to the store's `PRINT_TRAIL_WEBHOOK_SECRET`. A fresh mock knows only the configured SKUs, so mock mode re-runs the stock sync and re-checks stale variants before it starts (it saves those variants). It registers the store's local webhook URL with the admin's confirmation.
 
@@ -100,17 +100,17 @@ With `--mock`, the script starts the bundled mock itself at `PT_STAGING_BASE_URL
 | `unmatched-sku` | an unknown `print_trail_sku` is flagged and listed, and clears when restored | |
 | `send` | sent and confirmed; linked to the Print Trail order; the lines match; `confirmedAt` (API 1.1.0) | |
 | `webhook` | a status change at Print Trail reaches the plugin's row | change the status |
-| `dispatch` | one Medusa fulfilment and shipment per parcel, with Print Trail's tracking; auto-complete; the shipment email | dispatch; check the inbox |
-| `two-parcel` | the same per parcel, with the order open after the first (needs `PT_SECOND_SKU` from another supplier location) | dispatch twice |
+| `dispatch` | one Medusa fulfilment and shipment per parcel, with Print Trail's tracking; auto-complete; the shipment email | dispatch (skipped unless `CHECKLIST_STAGING_DISPATCH`); check the inbox |
+| `two-parcel` | the same per parcel, with the order open after the first (needs `PT_SECOND_SKU` from another supplier location) | dispatch twice (skipped unless `CHECKLIST_STAGING_DISPATCH`) |
 | `cancel` | a Medusa cancel reaches Print Trail: the plugin's cancel ends `cancelled` or `awaiting` (202), never refused, too late, failed or not sent | |
-| `cancel-too-late` | dispatched before Medusa hears, then cancelled: attention, timeline note, one admin email per address | dispatch; check the inbox |
+| `cancel-too-late` | dispatched before Medusa hears, then cancelled: attention, timeline note, one admin email per address | dispatch (skipped unless `CHECKLIST_STAGING_DISPATCH`); check the inbox |
 | `amend` | an order edit changes Print Trail's lines | |
 | `refund` | a partial refund is noted on the timeline and Print Trail is unchanged | |
 | `resend` | Resend of a confirmed order is refused; "Resend as new" after a Print Trail cancel sends `-2` | cancel at Print Trail |
 | `crash` | mock: a draft saved before a failing confirm is confirmed by Resend, with no duplicate; staging: an order placed across a restart is sent once | restart the store |
-| `preorder-unlimited`, `preorder-limited`, `preorder-mixed`, `preorder-release` | pre-orders (API 1.3.0, or `preOrderLimit` on stock levels): purchasable at 0, confirmed, waiting without attention, the remaining allowance, a mixed order shipping its in-stock part, release (opt-in) | dispatch; release |
+| `preorder-unlimited`, `preorder-limited`, `preorder-mixed`, `preorder-release` | pre-orders (API 1.3.0, or `preOrderLimit` on stock levels): purchasable at 0, confirmed, waiting without attention, the remaining allowance, a mixed order shipping its in-stock part, release (opt-in) | `preorder-mixed`: dispatch (skipped unless `CHECKLIST_STAGING_DISPATCH`); `preorder-release`: release |
 
-On staging, `cancel-too-late` races the dispatch webhook: the script cancels the moment Print Trail shows the dispatch. If the webhook wins, Medusa refuses the cancel and the scenario is skipped. The `webhook` check can also pass through the reconcile job, if it runs first.
+On staging (with `CHECKLIST_STAGING_DISPATCH`), `cancel-too-late` races the dispatch webhook: the script cancels the moment Print Trail shows the dispatch. If the webhook wins, Medusa refuses the cancel and the scenario is skipped. The `webhook` check can also pass through the reconcile job, if it runs first.
 
 ### CI
 

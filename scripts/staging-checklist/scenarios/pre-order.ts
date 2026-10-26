@@ -2,7 +2,7 @@
 // 1.3.0 or its stock rows carry the pre-order fields.
 import type { PtFulfilment } from "../../../src/modules/printTrail/client/types"
 import { expect, skip, sleep, waitFor } from "../lib/runner"
-import { firstRow, needsPerson, placeAndConfirm, shipped, waitForRow, type Ctx, type Placed, type Scenario, type SkuRole, type T } from "./common"
+import { firstRow, needsDispatch, needsPerson, placeAndConfirm, shipped, waitForRow, type Ctx, type Placed, type Scenario, type SkuRole, type T } from "./common"
 
 const needs = (role: SkuRole, env: string) => (ctx: Ctx) =>
   !ctx.preOrder.supported
@@ -119,7 +119,8 @@ export const preOrderLimited: Scenario = {
 export const preOrderMixed: Scenario = {
   id: "preorder-mixed",
   title: "Mixed order: the in-stock parcel ships, the pre-order part waits",
-  needs: (ctx) => needs("preOrderUnlimited", "PT_PREORDER_SKU")(ctx) ?? (ctx.variants.stocked ? null : "no variant resolves to PT_STOCKED_SKU"),
+  needs: (ctx) =>
+    needsDispatch(ctx) ?? needs("preOrderUnlimited", "PT_PREORDER_SKU")(ctx) ?? (ctx.variants.stocked ? null : "no variant resolves to PT_STOCKED_SKU"),
   run: async (t) => {
     const { ctx } = t
     await needsPerson(t, "dispatch at Print Trail")

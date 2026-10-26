@@ -1,6 +1,7 @@
 // Arguments, environment and the safety rules. Pure: nothing here makes a
 // request, so the unit tests cover every refusal.
 import { assertStagingTarget } from "../../../integration-tests/staging/guard"
+import { RETRY_DELAY_MS } from "../../../src/lib/retry"
 import { assertStoreUrl, parseForbiddenStores, StoreGuardError, type ForbiddenStore } from "./store-guard"
 
 export type Mode = "staging" | "mock"
@@ -41,7 +42,10 @@ export type Config = {
   // `{run}` is replaced with the run id.
   customerEmail: string
   adminInboxNote: string | null
-  timeouts: { send: number; webhook: number; human: number; sweep: number }
+  // CHECKLIST_STAGING_DISPATCH: someone can dispatch with tracking on this
+  // Print Trail (a warehouse). Off, staging skips the scenarios that need it.
+  stagingDispatch: boolean
+  timeouts: { send: number; webhook: number; human: number; crash: number }
   runId: string
 }
 
@@ -147,6 +151,19 @@ const seconds = (env: NodeJS.ProcessEnv, key: string, fallback: number) => {
   return n * 1000
 }
 
+// A switch: 1 or true is on; unset, empty, 0 or false is off.
+const switchOn = (env: NodeJS.ProcessEnv, key: string) => {
+  const raw = env[key]?.trim().toLowerCase()
+  if (!raw || raw === "0" || raw === "false") return false
+  if (raw === "1" || raw === "true") return true
+  return refuse(`${key} must be 1 or true (on), or 0 or false (off)`)
+}
+
+// A send cut off by a restart is retried once its lease (the plugin's retry
+// delay) has passed, by the next sweep: one default sweep interval (5 min)
+// and a margin after that.
+export const CRASH_TIMEOUT_SECONDS = RETRY_DELAY_MS / 1000 + 600
+
 export function loadConfig(args: Args, env: NodeJS.ProcessEnv, now = new Date()): Config {
   const mode: Mode = args.mock ? "mock" : "staging"
   const printTrailUrl = assertPrintTrailTarget(mode, env.PT_STAGING_BASE_URL)
@@ -194,11 +211,12 @@ export function loadConfig(args: Args, env: NodeJS.ProcessEnv, now = new Date())
     countryCode: (optional("CHECKLIST_COUNTRY") ?? "gb").toLowerCase(),
     customerEmail: customerEmail.replace("{run}", runId),
     adminInboxNote: optional("CHECKLIST_ADMIN_INBOX"),
+    stagingDispatch: switchOn(env, "CHECKLIST_STAGING_DISPATCH"),
     timeouts: {
       send: seconds(env, "CHECKLIST_SEND_TIMEOUT", 90),
       webhook: seconds(env, "CHECKLIST_WEBHOOK_TIMEOUT", mode === "mock" ? 30 : 180),
       human: seconds(env, "CHECKLIST_HUMAN_TIMEOUT", 900),
-      sweep: seconds(env, "CHECKLIST_SWEEP_TIMEOUT", 420),
+      crash: seconds(env, "CHECKLIST_CRASH_TIMEOUT", CRASH_TIMEOUT_SECONDS),
     },
     runId,
   }

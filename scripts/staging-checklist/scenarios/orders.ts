@@ -6,6 +6,7 @@ import {
   emailsFor,
   emailTemplate,
   liveFulfilments,
+  needsDispatch,
   needsPerson,
   placeAndConfirm,
   sharedOrder,
@@ -158,7 +159,7 @@ async function expectShipmentEmails(t: T, placed: Placed, parcels: number) {
 export const dispatch: Scenario = {
   id: "dispatch",
   title: "Dispatch: Medusa fulfilment, shipment, tracking and auto-complete",
-  needs: (ctx) => (ctx.variants.stocked ? null : "no variant resolves to PT_STOCKED_SKU"),
+  needs: (ctx) => needsDispatch(ctx) ?? (ctx.variants.stocked ? null : "no variant resolves to PT_STOCKED_SKU"),
   run: async (t) => {
     const { ctx } = t
     await needsPerson(t, "dispatch at Print Trail")
@@ -181,13 +182,14 @@ export const twoParcel: Scenario = {
   id: "two-parcel",
   title: "Two-parcel order: one fulfilment and shipment per parcel",
   needs: (ctx: Ctx) =>
-    !ctx.config.skus.second
+    needsDispatch(ctx) ??
+    (!ctx.config.skus.second
       ? "PT_SECOND_SKU is not set"
       : !ctx.variants.second
         ? "no variant resolves to PT_SECOND_SKU"
         : !ctx.variants.stocked
           ? "no variant resolves to PT_STOCKED_SKU"
-          : null,
+          : null),
   run: async (t) => {
     const { ctx } = t
     await needsPerson(t, "dispatch at Print Trail")
