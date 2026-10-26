@@ -15,7 +15,7 @@ Website: [printtrail.com](https://printtrail.com/). Guide: [docs.printtrail.com/
 
 The order page: each Print Trail fulfilment with its tracking, and the order's Print Trail timeline.
 
-![The Print Trail settings page: the connection shows Connected with the channel, team and Print Trail API version, and the webhook is registered with its secret from Print Trail](media/settings.png)
+![The Print Trail settings page: the connection shows Connected with the channel, team and API endpoint, and the webhook is registered with its secret from Print Trail](media/settings.png)
 
 Settings → Print Trail: the connection and the webhook.
 
@@ -27,7 +27,7 @@ Print Trail shipping: options priced by weight band, here with Ireland's own ban
 
 - Medusa `^2.17.2`, tested on 2.17.2 and 2.22.1.
 - Node 22.
-- A Print Trail account with a channel for the store, and the channel's API token.
+- A Print Trail account with a channel of its own for the store (not the Standard channel), and that channel's API token. Both are in the Print Trail app under Settings → Channels: **Token** on the channel's row creates the token, which is shown once.
 - Redis locking (Medusa's Locking Module with its Redis provider) when the store runs more than one process (a server and a worker count as two). Without a shared lock, two processes can send the same order twice.
 
 ## Setup
@@ -78,36 +78,39 @@ There are two blocks because Medusa passes a plugin's options only to the module
 
 Setting `providers` replaces Medusa's default list, so keep the manual provider listed or the store's manual shipping options stop working. If the store already has an `@medusajs/medusa/fulfillment` entry, add the Print Trail provider to it.
 
-### 3. Run the migrations
+### 3. Set the environment variables
 
-```bash
-npx medusa db:migrate
-```
-
-They create the plugin's tables and its link to orders.
-
-### 4. Set the environment variables
-
-- `PRINT_TRAIL_BASE_URL`: the Print Trail API host shown in the Print Trail app. It has no default, so set it with the other two: a channel ID or token without it stops the plugin's module loading.
-- `PRINT_TRAIL_CHANNEL_ID`: the store's Print Trail channel.
+- `PRINT_TRAIL_BASE_URL`: `https://api.printtrail.com`. It has no default, so set it with the other two: a channel ID or token without it stops the plugin's module loading.
+- `PRINT_TRAIL_CHANNEL_ID`: the store's Print Trail channel ID.
 - `PRINT_TRAIL_API_TOKEN`: the channel's API token.
 - `MEDUSA_BACKEND_URL`: this backend's public `https://` URL. Print Trail sends its webhooks to `{MEDUSA_BACKEND_URL}/hooks/print-trail`.
 - `MEDUSA_ADMIN_URL`: the Medusa admin URL, for links from Print Trail back to the order.
 - `PRINT_TRAIL_ADMIN_EMAIL`: who is emailed when a Medusa cancel comes too late for Print Trail. A comma-separated list is accepted.
 
-The plugin reads the three `PRINT_TRAIL_` credentials itself; the other three are the names the config above passes through. Changing any of them needs a restart.
+The plugin reads the three `PRINT_TRAIL_` credentials itself; the other three are the names the config above passes through. Changing any of them later needs a restart.
+
+### 4. Run the migrations and start Medusa
+
+```bash
+npx medusa db:migrate
+```
+
+They create the plugin's tables and its link to orders. Then start Medusa, or restart it if it's running, so it reads the variables.
 
 ### 5. Connect in the admin
 
 1. Go to Settings → Print Trail and press **Test connection**. It checks the token and channel, registers the store's webhook with Print Trail and fetches the webhook secret.
 2. Put the products Print Trail fulfils in a shipping profile of their own.
-3. On Settings → Print Trail → Shipping, create a Print Trail shipping option for that profile, with a Print Trail method and weight bands. Its fulfilment set must be linked to a stock location.
+3. On Settings → Print Trail, follow the **Print Trail shipping options** link and create a Print Trail shipping option in a service zone, for that profile, with a Print Trail method and weight bands. Its fulfilment set must be linked to a stock location.
 
 Variants are matched to Print Trail by SKU. Where Print Trail's SKU differs, set it in the Print Trail panel on the variant page.
 
+Before taking live orders, cancel any open test orders (the plugin sends open orders with Print Trail lines from the last 7 days), and switch payments and Print Trail credentials to live together.
+
 ## Documentation
 
-The full guide is at **[docs.printtrail.com/channels/medusa](https://docs.printtrail.com/channels/medusa/)**: setup, rate cards, pre-orders, notifications, the developer reference (options, workflows, hooks, events, jobs and API routes) and troubleshooting.
+- **Guide:** [docs.printtrail.com/channels/medusa](https://docs.printtrail.com/channels/medusa/), for setting the plugin up and using it day to day.
+- **Reference:** [docs.printtrail.com/developers/medusa-plugin](https://docs.printtrail.com/developers/medusa-plugin/), for every option, rate cards, pre-orders, notifications, the workflows and hooks, events, jobs, API routes and troubleshooting.
 
 - [Changelog](https://github.com/consilience/medusa-plugin-print-trail/blob/main/CHANGELOG.md), with each release's upgrade notes.
 - [Contributing](https://github.com/consilience/medusa-plugin-print-trail/blob/main/CONTRIBUTING.md): developing and testing the plugin.

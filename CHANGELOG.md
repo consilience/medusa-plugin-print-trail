@@ -8,8 +8,10 @@ package uses [semantic versioning](https://semver.org/).
 
 ### Changed
 
-- **The README is short.** It says what the plugin does, what it needs and how to set it up. The full guide is on docs.printtrail.com, at [docs.printtrail.com/channels/medusa](https://docs.printtrail.com/channels/medusa/): the options, rate cards, pre-orders, notifications, the developer reference and troubleshooting. The README no longer lists Print Trail API versions.
-- The hint under a shipping option's per-country bands points at the plugin's guide on docs.printtrail.com instead of the README.
+- **The README is short.** It says what the plugin does, what it needs and how to set it up. The rest is on docs.printtrail.com: the [guide](https://docs.printtrail.com/channels/medusa/) for setting up and day-to-day use, and the [reference](https://docs.printtrail.com/developers/medusa-plugin/) for the options, rate cards, pre-orders, notifications, the developer surface and troubleshooting. The README no longer lists Print Trail API versions.
+- The "Package entry points" list that 1.0.0's upgrade note refers to is now in the [reference](https://docs.printtrail.com/developers/medusa-plugin/).
+- The hint under a shipping option's per-country bands points at the reference instead of the README.
+- The production Print Trail API host, `https://api.printtrail.com`, is named where the plugin asks for `PRINT_TRAIL_BASE_URL`. The error for a missing base URL no longer says the host is shown in the Print Trail app, and the settings page's setup snippet uses the production host instead of staging.
 
 ## [1.0.0] - 2026-10-26
 
