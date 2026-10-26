@@ -21,10 +21,10 @@ Settings → Print Trail: the connection and the webhook.
 
 ## Requirements
 
-- Medusa `^2.17.2`, tested on 2.17.2 and 2.22.1.
-- Node 22.
+- Medusa `^2.17.2`, tested on 2.17.2 and 2.22.1 with Node 22.
 - A Print Trail account with a channel of its own for the store (not the Standard channel), and that channel's API token. Both are in the Print Trail app under Settings → Channels: **Token** on the channel's row creates the token, which is shown once.
 - Redis locking (Medusa's Locking Module with its Redis provider) when the store runs more than one process (a server and a worker count as two). Without a shared lock, two processes can send the same order twice.
+- An email provider in Medusa (a notification provider on the `email` channel) for the shipment and admin emails. Without one, none is sent.
 
 ## Setup
 
@@ -79,7 +79,7 @@ Setting `providers` replaces Medusa's default list, so keep the manual provider 
 - `PRINT_TRAIL_BASE_URL`: `https://api.printtrail.com`. It has no default, so set it with the other two: a channel ID or token without it stops the plugin's module loading.
 - `PRINT_TRAIL_CHANNEL_ID`: the store's Print Trail channel ID.
 - `PRINT_TRAIL_API_TOKEN`: the channel's API token.
-- `MEDUSA_BACKEND_URL`: this backend's public `https://` URL. Print Trail sends its webhooks to `{MEDUSA_BACKEND_URL}/hooks/print-trail`.
+- `MEDUSA_BACKEND_URL`: this backend's public `https://` URL. Print Trail sends its webhooks to `{MEDUSA_BACKEND_URL}/hooks/print-trail`, and only to an `https://` URL on a public host, so a local store needs an HTTPS tunnel.
 - `MEDUSA_ADMIN_URL`: the Medusa admin URL, for links from Print Trail back to the order.
 - `PRINT_TRAIL_ADMIN_EMAIL`: who is emailed when a Medusa cancel comes too late for Print Trail. A comma-separated list is accepted.
 
