@@ -10,18 +10,37 @@ import { createAuthTracker } from "../../lib/auth-state"
 import { LOCKING_CHECK_STATE_KEY, type LockingCheck } from "../../lib/locking-check"
 import { PRE_ORDER_SEEN_PREFIX } from "../../lib/pre-order"
 import { normaliseSku } from "../../lib/sku"
+import type { SkuCheck, SkuCheckStatus } from "../../lib/sku-check"
 import { createEachUnlessExists } from "../../lib/state-queue"
+import { checkColumns, type CheckSource, type VariantCheckRow } from "../../lib/variant-checks"
 import { PrintTrailClient, STATUS_CLIENT_TUNING, type RateLimitGate } from "./client/client"
 import { PROBLEM_TYPES } from "./client/errors"
 import PrintTrailOrder from "./models/print-trail-order"
 import PrintTrailOrderEvent from "./models/print-trail-order-event"
 import PrintTrailState from "./models/print-trail-state"
+import PrintTrailVariant from "./models/print-trail-variant"
 
 export { AUTH_FAILED_STATE_KEY, CHANNEL_INACTIVE_STATE_KEY, type AuthFailedState } from "../../lib/auth-state"
 
 type Logger = { warn(message: string): void }
 
 const SEEN_CHUNK = 500
+const VARIANT_ROW_CHUNK = 500
+
+const chunks = <T>(items: T[], size: number): T[][] => {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  return out
+}
+
+export type CheckStatusUpdate = {
+  id: string
+  // The row's check as it was read: written only while it still is.
+  expect: { sku: string | null; status: string }
+  // null clears the check, so the SKU check runs again.
+  status: SkuCheckStatus | null
+  at: Date
+}
 
 // CRUD only, plus the plugin options and the API client built from them.
 // Business logic lives in workflows.
@@ -29,6 +48,7 @@ class PrintTrailModuleService extends MedusaService({
   PrintTrailOrder,
   PrintTrailOrderEvent,
   PrintTrailState,
+  PrintTrailVariant,
 }) {
   protected readonly options_: PrintTrailPluginOptions
   private client_?: PrintTrailClient
@@ -205,6 +225,127 @@ class PrintTrailModuleService extends MedusaService({
       for (const r of await this.listPrintTrailStates({ key: keys }, { select: ["key"] })) have.add(r.key)
     }
     return skus.filter((s) => have.has(`${PRE_ORDER_SEEN_PREFIX}${normaliseSku(s)}`))
+  }
+
+  // print_trail_variant: one row per checked variant (src/lib/variant-checks.ts).
+
+  // variant id → its row, for the variants that have one.
+  async variantRows(variantIds: string[]): Promise<Map<string, VariantCheckRow>> {
+    const out = new Map<string, VariantCheckRow>()
+    for (const ids of chunks([...new Set(variantIds)], VARIANT_ROW_CHUNK)) {
+      for (const r of await this.listPrintTrailVariants({ variant_id: ids })) out.set(r.variant_id, r as VariantCheckRow)
+    }
+    return out
+  }
+
+  // Creates the variant's row, or replaces every check column of it.
+  async writeVariantCheck(input: { variantId: string; productId: string; check: SkuCheck | null; source: CheckSource }): Promise<void> {
+    const columns = { ...checkColumns(input.check, input.source), product_id: input.productId }
+    const [row] = await this.listPrintTrailVariants({ variant_id: input.variantId }, { select: ["id"] })
+    if (row) {
+      await this.updatePrintTrailVariants({ id: row.id, ...columns })
+      return
+    }
+    try {
+      await this.createPrintTrailVariants({ variant_id: input.variantId, ...columns })
+    } catch (e) {
+      // Another writer created the row first (unique on variant_id).
+      const [raced] = await this.listPrintTrailVariants({ variant_id: input.variantId }, { select: ["id"] })
+      if (!raced) throw e
+      await this.updatePrintTrailVariants({ id: raced.id, ...columns })
+    }
+  }
+
+  // Legacy checks from variant metadata, created only where the variant has
+  // no row: a row written meanwhile wins. Returns how many were created.
+  async adoptVariantChecks(rows: { variantId: string; productId: string; check: SkuCheck }[]): Promise<number> {
+    let created = 0
+    for (const chunk of chunks(rows, VARIANT_ROW_CHUNK)) {
+      const existing = await this.variantRows(chunk.map((r) => r.variantId))
+      const seen = new Set<string>()
+      const missing = chunk.filter((r) => !existing.has(r.variantId) && !seen.has(r.variantId) && seen.add(r.variantId))
+      if (!missing.length) continue
+      const data = (r: (typeof missing)[number]) => ({ variant_id: r.variantId, product_id: r.productId, ...checkColumns(r.check, "metadata") })
+      try {
+        await this.createPrintTrailVariants(missing.map(data))
+        created += missing.length
+      } catch {
+        // A row was created meanwhile: one at a time, keeping the newer.
+        for (const r of missing) {
+          try {
+            await this.createPrintTrailVariants(data(r))
+            created++
+          } catch (e) {
+            if (!(await this.listPrintTrailVariants({ variant_id: r.variantId }, { select: ["id"] })).length) throw e
+          }
+        }
+      }
+    }
+    return created
+  }
+
+  // Hard-deletes the rows of these variants, or of these products' variants.
+  async forgetVariants(filter: { variantIds?: string[]; productIds?: string[] }): Promise<number> {
+    let deleted = 0
+    const sets: [keyof VariantCheckRow, string[]][] = [
+      ["variant_id", filter.variantIds ?? []],
+      ["product_id", filter.productIds ?? []],
+    ]
+    for (const [column, values] of sets) {
+      for (const ids of chunks([...new Set(values)], VARIANT_ROW_CHUNK)) {
+        const rows = await this.listPrintTrailVariants({ [column]: ids }, { select: ["id"] })
+        if (!rows.length) continue
+        await this.deletePrintTrailVariants(rows.map((r) => r.id))
+        deleted += rows.length
+      }
+    }
+    return deleted
+  }
+
+  // The distinct SKUs whose check is not-found, for the unmatched notice.
+  async notFoundSkus(): Promise<string[]> {
+    const rows = await this.listPrintTrailVariants({ check_status: "not-found" }, { select: ["check_sku"] })
+    const out = new Map<string, string>()
+    for (const r of rows) {
+      const k = normaliseSku(r.check_sku)
+      if (k && !out.has(k)) out.set(k, r.check_sku!.trim())
+    }
+    return [...out.values()]
+  }
+
+  // Up to `take` rows with ids after `after` (null: from the first), by id
+  // ascending: keyset, so a row deleted behind the cursor hides none.
+  async variantRowPage(after: string | null, take: number): Promise<VariantCheckRow[]> {
+    const rows = await this.listPrintTrailVariants(after === null ? {} : { id: { $gt: after } }, { take, order: { id: "ASC" } })
+    return rows as VariantCheckRow[]
+  }
+
+  // The stock sync's status writes: each row is re-read and written only
+  // while its SKU and status are still those it read. Compare-then-set, not
+  // atomic: a SKU check landing in between can be overwritten, and the next
+  // sync or save corrects it. Returns how many were written.
+  async setCheckStatuses(updates: CheckStatusUpdate[]): Promise<number> {
+    let written = 0
+    for (const chunk of chunks(updates, VARIANT_ROW_CHUNK)) {
+      const rows = await this.listPrintTrailVariants(
+        { id: chunk.map((u) => u.id) },
+        { select: ["id", "check_sku", "check_status"] }
+      )
+      const byId = new Map(rows.map((r) => [r.id, r]))
+      const writes = chunk.flatMap((u) => {
+        const r = byId.get(u.id)
+        if (!r || r.check_sku !== u.expect.sku || r.check_status !== u.expect.status) return []
+        return [
+          u.status === null
+            ? { id: u.id, ...checkColumns(null, "stock-sync") }
+            : { id: u.id, check_status: u.status, checked_at: u.at, check_source: "stock-sync" },
+        ]
+      })
+      if (!writes.length) continue
+      await this.updatePrintTrailVariants(writes)
+      written += writes.length
+    }
+    return written
   }
 
   // Removes and returns up to `limit` queued ids, oldest first. Callers hold
