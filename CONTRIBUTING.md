@@ -150,7 +150,7 @@ Until `NPM_PUBLISH` is set, `publish` is skipped and a tag only makes the GitHub
 
 These steps follow npm's docs (<https://docs.npmjs.com/trusted-publishers> and the `npm trust` command) and GitHub's, as of 2026-10-25. The package is published under the npm organisation `print-trail`. Its first public version is 1.0.0, and no earlier version was published to npm. `repository.url` in `package.json` must name this repository, since npm matches it against the repository the workflow runs in.
 
-1. **Publish the first version by hand.** A trusted publisher can only be added to a package that already exists on npm (the `npm trust` docs say so), so the first version is published from the npm account that will own the package, with two-factor authentication. Push its tag first: the release workflow tests the tarball and attaches it to the version's GitHub Release. Then publish that file:
+1. **Publish the first version by hand.** A trusted publisher can only be added to a package that already exists on npm (the `npm trust` docs say so), so a member of the npm organisation `print-trail` publishes the first version by hand, from their own account with two-factor authentication. Push its tag first: the release workflow tests the tarball and attaches it to the version's GitHub Release. Then publish that file:
 
    ```bash
    publish_release() {
@@ -170,7 +170,13 @@ These steps follow npm's docs (<https://docs.npmjs.com/trusted-publishers> and t
    publish_release <version>
    ```
 
-   Check that `npm whoami` names the owning account. `publish_release` downloads the tarball from the version's GitHub Release and stops, publishing nothing, if the download fails or the file's sha256 doesn't match the release's digest for it. Anything after the version goes to `npm publish`, so a prerelease (a version with a `-`) is `publish_release <version> --tag next`. npm asks for a one-time password (or add `--otp <code>`). Publishing a tarball runs no lifecycle scripts, so what goes up is what the workflow tested. npm 11 refuses a prerelease without `--tag`; npm 10, Node 22's own, would make it `latest`.
+   Check that `npm whoami` names your own account, a member of `print-trail`. `publish_release` downloads the tarball from the version's GitHub Release and stops, publishing nothing, if the download fails or the file's sha256 doesn't match the release's digest for it. Anything after the version goes to `npm publish`, so a prerelease (a version with a `-`) is `publish_release <version> --tag next`. npm asks for a one-time password (or add `--otp <code>`). Publishing a tarball runs no lifecycle scripts, so what goes up is what the workflow tested. npm 11 refuses a prerelease without `--tag`; npm 10, Node 22's own, would make it `latest`.
+
+   Then give the organisation's `developers` team read-write access to the package, so it doesn't rest on one account:
+
+   ```bash
+   npm access grant read-write print-trail:developers medusa-plugin-print-trail
+   ```
 
 2. **Set up the `npm` environment on GitHub.** In the repository's Settings, under Environments, create `npm`. Under Deployment branches and tags, choose Selected branches and tags and add a rule with Ref type Tag and the pattern `v*`, so only a `v*` tag can run the `publish` job. A required reviewer (with Prevent self-review) makes each publish wait for an approval; a public repository has them on any GitHub plan. Then limit who can create `v*` tags with a tag ruleset (Settings, Rulesets, New ruleset, New tag ruleset): target `v*`, turn on Restrict creations, give bypass to whoever releases, and make it Active.
 
