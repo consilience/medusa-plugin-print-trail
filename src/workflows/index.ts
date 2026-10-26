@@ -17,6 +17,11 @@ export {
   type StockSyncInput,
 } from "./sync-print-trail-stock"
 export {
+  requestPrintTrailStockSyncWorkflow,
+  requestPrintTrailStockSyncWorkflowId,
+  type RequestPrintTrailStockSyncInput,
+} from "./request-print-trail-stock-sync"
+export {
   cancelPrintTrailOrderWorkflow,
   cancelPrintTrailOrderWorkflowId,
   type CancelPrintTrailOrderInput,

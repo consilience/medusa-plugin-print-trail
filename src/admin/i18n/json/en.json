@@ -94,6 +94,16 @@
       "lastRunSummary": "{{trigger}}, {{at}}: {{levels}} stock levels updated, {{skipped}} variants skipped",
       "lastRunError": "The last stock sync failed: {{error}}",
       "stockSyncOff": "Stock sync is turned off.",
+      "syncNow": {
+        "button": "Sync stock now",
+        "unavailable": "Stock sync is turned off in the plugin's options.",
+        "completed": "Stock synced: {{summary}}",
+        "deferred": "A stock sync is already running. This one runs after it, within one sweep.",
+        "disabled": "Stock sync is turned off, or the plugin isn't connected.",
+        "dropped": "Nothing to sync: the stock is already up to date.",
+        "failed": "The stock sync failed: {{reason}}",
+        "requestFailed": "Something went wrong: {{message}}. The last stock sync below shows how the run ended."
+      },
       "warning": {
         "duplicate-sku": "More than one inventory item resolves to these SKUs, so their stock wasn't written: {{skus}}",
         "multi-location": "These SKUs' stock went to more than one stock location (set stockLocationIds to choose): {{skus}}",

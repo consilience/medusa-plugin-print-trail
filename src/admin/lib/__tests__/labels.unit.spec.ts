@@ -11,6 +11,8 @@ import {
   statusColor,
   onlyWaitingForRelease,
   secretSourceKey,
+  stockSyncToast,
+  stockSyncUnavailableKey,
   warningKey,
   webhookActionKey,
   webhookStateKey,
@@ -120,6 +122,27 @@ describe("labels", () => {
 
 // An order only waiting for its pre-order release isn't an
 // orange back-order.
+// "Sync stock now" on the settings page.
+describe("stockSyncToast", () => {
+  const STATUSES = ["completed", "deferred", "disabled", "dropped", "failed"] as const
+
+  it("maps every status to a toast with an English string", () => {
+    const toasts = STATUSES.map((status) => stockSyncToast({ status, summary: status === "failed" ? "failed: Print Trail said no" : "3 levels updated" }))
+    expect(toasts.map((t) => t.variant)).toEqual(["success", "info", "info", "info", "error"])
+    expect(toasts.map((t) => t.key).filter((k) => !has(k))).toEqual([])
+    expect(new Set(toasts.map((t) => t.key)).size).toBe(STATUSES.length)
+    expect(has(stockSyncUnavailableKey)).toBe(true)
+    expect(has("settings.sku.syncNow.button")).toBe(true)
+    expect(has("settings.sku.syncNow.requestFailed")).toBe(true)
+  })
+
+  it("carries the summary, and a failure's reason without its prefix", () => {
+    expect(stockSyncToast({ status: "completed", summary: "3 levels updated" }).values).toEqual({ summary: "3 levels updated" })
+    expect(stockSyncToast({ status: "failed", summary: "failed: Print Trail said no" }).values).toEqual({ reason: "Print Trail said no" })
+    expect(en.settings.sku.syncNow.deferred).toBe("A stock sync is already running. This one runs after it, within one sweep.")
+  })
+})
+
 describe("onlyWaitingForRelease", () => {
   const f = (back_order: string | null, status = back_order ? "back-order" : "dispatched") => ({ status, back_order }) as any
   it("is true for a back-order order whose every back-order waits", () => {

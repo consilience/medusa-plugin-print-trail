@@ -1,4 +1,11 @@
-import type { DiagnosisCode, SettingsWarning, WebhookAction, WebhookState, WebhookWarning } from "../../lib/admin-types"
+import type {
+  DiagnosisCode,
+  SettingsWarning,
+  StockSyncNowView,
+  WebhookAction,
+  WebhookState,
+  WebhookWarning,
+} from "../../lib/admin-types"
 
 // i18n keys (namespace printTrail) and badge colours for the codes the
 // server sends. Server codes are never shown raw.
@@ -136,3 +143,16 @@ export function onlyWaitingForRelease(row: { status: string | null; fulfilments:
   const backOrders = row.fulfilments.filter((f) => f.status === "back-order")
   return row.status === "back-order" && backOrders.length > 0 && backOrders.every((f) => f.back_order === "pre-order")
 }
+
+// "Sync stock now": the toast for each result. A failure's reason is the
+// summary without describeStockResult's "failed: ".
+export function stockSyncToast(view: StockSyncNowView): Label & { variant: "success" | "info" | "error" } {
+  if (view.status === "completed") return { variant: "success", key: "settings.sku.syncNow.completed", values: { summary: view.summary } }
+  if (view.status === "failed") {
+    return { variant: "error", key: "settings.sku.syncNow.failed", values: { reason: view.summary.replace(/^failed: /, "") } }
+  }
+  return { variant: "info", key: `settings.sku.syncNow.${view.status}` }
+}
+
+// The button's tooltip while the stock sync is turned off.
+export const stockSyncUnavailableKey = "settings.sku.syncNow.unavailable"

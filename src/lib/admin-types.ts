@@ -245,6 +245,9 @@ export type StockRunView = {
   error: string | null
 }
 
+// POST /admin/print-trail/stock-sync. summary: describeStockResult.
+export type StockSyncNowView = { status: "completed" | "deferred" | "disabled" | "dropped" | "failed"; summary: string }
+
 export type SkuHealthView = {
   unmatched: string[]
   problems: SkuProblem[]
