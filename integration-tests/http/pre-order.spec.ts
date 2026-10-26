@@ -257,11 +257,12 @@ medusaIntegrationTestRunner({
       // stock job run by the test.
       mock().state.stock[SKUS.preOrder] = 5
       await mock().setSkuStatus(SKUS.preOrder, "active")
+      // The sync turns the backorder off before it untracks the variant and
+      // its reason, so both are waited for.
       await waitFor(async () => {
         const v = await variantOf(seed.variants.preOrder)
-        return !v.allowBackorder && v.stocked === 5 ? v : undefined
-      }, { what: "backorders off at stock 5" })
-      expect(await reasonOf(seed.variants.preOrder)).toBeUndefined()
+        return !v.allowBackorder && v.stocked === 5 && (await reasonOf(seed.variants.preOrder)) === undefined ? v : undefined
+      }, { what: "backorders off at stock 5, and untracked" })
       expect(await viewStock(seed.variants.preOrder)).toMatchObject({ pre_order_backorder: false })
     })
 
