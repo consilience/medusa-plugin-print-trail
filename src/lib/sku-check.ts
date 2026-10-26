@@ -5,9 +5,12 @@ import { mergeUnmatched, STATE_KEYS } from "./stock"
 import type { StateStore } from "./team-code"
 
 // The SKU check run when a variant or product is saved: validate the resolved
-// SKU with POST /products/validate-skus and record the result in variant
-// metadata. Compare-before-call and compare-before-write keep the plugin's own
-// write-back (which fires product-variant.updated again) from looping.
+// SKU with POST /products/validate-skus and record the result in the
+// variant's print_trail_variant row (src/lib/variant-checks.ts). Until a
+// variant has a row, its legacy check in metadata is read. Compare-before-call
+// skips Print Trail for a current check; compare-before-write skips rewriting
+// an identical result in an existing row. The write fires no Medusa event, so
+// the comparison is an optimisation, not a loop guard.
 
 export type SkuCheckStatus = "matched" | "inactive" | "pre-order" | "not-found" | "no-sku" | "error"
 export type SkuCheck = {
@@ -19,8 +22,6 @@ export type SkuCheck = {
   // zeros may have been lost.
   note?: "numeric-override"
 }
-export const SKU_CHECK_KEY = "print_trail_sku_check"
-
 type StoredCheck = { sku?: unknown; status?: unknown; matched_sku?: unknown; note?: unknown }
 
 const asCheck = (check: unknown): StoredCheck | null =>
@@ -66,13 +67,23 @@ const sameResult = (stored: unknown, next: SkuCheck) => {
   )
 }
 
-export type CheckVariant = { id: string; sku: string | null; metadata: Record<string, unknown> | null; profileId: string | null }
+export type CheckVariant = {
+  id: string
+  sku: string | null
+  // Still read for the numeric-override note.
+  metadata: Record<string, unknown> | null
+  profileId: string | null
+  productId: string
+  // storedCheck(row, metadata): the row's check, else the legacy one.
+  check: SkuCheck | null
+  hasRow: boolean
+}
 
 export type SkuCheckPort = {
   ptProfileIds(): Promise<string[]>
   loadVariants(input: { variantIds?: string[]; productId?: string }): Promise<CheckVariant[]>
-  // Writes only metadata.print_trail_sku_check.
-  writeCheck(variantId: string, check: SkuCheck): Promise<void>
+  // Writes the variant's print_trail_variant row; never its metadata.
+  writeCheck(variant: { id: string; productId: string }, check: SkuCheck): Promise<void>
   // Rows with block_reason "unmatched-skus" and confirmed_at null, with the
   // SKUs Print Trail refused (null for rows blocked before they were recorded).
   blockedRows(): Promise<{ id: string; order_id: string; sequence: number; unmatchedSkus: string[] | null }[]>
@@ -137,7 +148,7 @@ export async function checkVariantSkus(
 
   const due: CheckVariant[] = []
   for (const v of variants) {
-    if (isCheckCurrent(v.sku, v.metadata?.[SKU_CHECK_KEY], { numericOverride: isNumericOverride(v.metadata) })) {
+    if (isCheckCurrent(v.sku, v.check, { numericOverride: isNumericOverride(v.metadata) })) {
       outcome.skipped.push(v.id)
     } else {
       due.push(v)
@@ -151,8 +162,9 @@ export async function checkVariantSkus(
 }
 
 async function checkDue(ctx: SkuCheckContext, due: CheckVariant[], now: Date, outcome: SkuCheckOutcome) {
-  // The stored checks as they were before this call writes any.
-  const previous = new Map(due.map((v) => [v.id, asCheck(v.metadata?.[SKU_CHECK_KEY])]))
+  // The stored checks (row, else legacy) as they were before this call
+  // writes any.
+  const previous = new Map(due.map((v) => [v.id, asCheck(v.check)]))
 
   // One call for every distinct SKU (the client chunks above 250).
   const distinct = new Map<string, string>()
@@ -219,17 +231,22 @@ async function checkDue(ctx: SkuCheckContext, due: CheckVariant[], now: Date, ou
     })
   }
 
+  const byId = new Map(due.map((v) => [v.id, v]))
   for (const { variantId, check } of outcome.checked) {
-    // An identical stored result (a repeated couldn't-check) isn't rewritten,
-    // so its write-back event can't start another round.
-    if (!sameResult(previous.get(variantId), check)) {
-      await ctx.port.writeCheck(variantId, check)
+    const v = byId.get(variantId)!
+    // A variant with no row always gets one, even when its legacy check says
+    // the same; an identical result in an existing row (a repeated
+    // couldn't-check) isn't rewritten.
+    if (!v.hasRow || !sameResult(previous.get(variantId), check)) {
+      await ctx.port.writeCheck({ id: v.id, productId: v.productId }, check)
     }
   }
 
-  // The unmatched list (a changed SKU forgets the old one).
+  // The notice reads not-found SKUs from the rows (readUnmatchedSkus). The
+  // list 0.2.0 kept, sku_check_unmatched, is only read until the metadata
+  // scan deletes it; meanwhile SKUs are forgotten from it (a changed SKU, or
+  // one now known to Print Trail), never added, and it is never created.
   const forget: string[] = []
-  const add: string[] = []
   for (const { variantId, check } of outcome.checked) {
     const prior = previous.get(variantId) ?? null
     const prevSku = typeof prior?.sku === "string" ? prior.sku : null
@@ -237,19 +254,16 @@ async function checkDue(ctx: SkuCheckContext, due: CheckVariant[], now: Date, ou
     if (check.sku && KNOWN_STATUSES.includes(check.status)) {
       forget.push(check.sku)
       if (check.matched_sku) forget.push(check.matched_sku)
-    } else if (check.sku && check.status === "not-found") {
-      add.push(check.sku)
     }
   }
-  if (forget.length || add.length) {
-    // The SKU check's own key: unmatched_skus belongs to the stock sync.
+  if (forget.length) {
     const stored = await ctx.state.getState<{ skus: string[] }>(STATE_KEYS.skuCheckUnmatched)
-    const current = stored?.skus ?? []
-    // Added SKUs win over forgotten ones (an old SKU another variant still
-    // lacks is re-added by its own check).
-    const next = mergeUnmatched(mergeUnmatched(current, { forget }), { add })
-    if (!stored || next.join("\n") !== current.join("\n")) {
-      await ctx.state.setState(STATE_KEYS.skuCheckUnmatched, { skus: next, updatedAt: now.toISOString() })
+    if (stored) {
+      const current = stored.skus ?? []
+      const next = mergeUnmatched(current, { forget })
+      if (next.join("\n") !== current.join("\n")) {
+        await ctx.state.setState(STATE_KEYS.skuCheckUnmatched, { skus: next, updatedAt: now.toISOString() })
+      }
     }
   }
 }

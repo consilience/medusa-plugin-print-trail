@@ -4,6 +4,7 @@ import { ACCESS_SKIPPED, accessRefusedNow, refusalWatch } from "../lib/auth-stat
 import { PRINT_TRAIL_PROVIDER_ID, shippingOptionIds } from "../lib/lines"
 import { runSkuCheckQueue } from "../lib/sku-check-queue"
 import { STATE_KEYS } from "../lib/stock"
+import { runLegacyMetadataScan } from "../lib/stock-flow"
 import { describeStockResult, requestStockSync } from "../lib/stock-request"
 import { dueCancels, dueRows, findOrdersMissingRows, ordersMissingCancel, sweepWindow } from "../lib/sweep"
 import { runSweepSteps } from "../lib/sweep-steps"
@@ -14,6 +15,7 @@ import { cancelPrintTrailOrderWorkflow } from "../workflows/cancel-print-trail-o
 import { runPrintTrailFollowUps } from "../workflows/run-follow-ups"
 import { sendOrderToPrintTrailWorkflow } from "../workflows/send-order-to-print-trail"
 import { buildSkuCheckQueueContext } from "../workflows/steps/sku-check-context"
+import { buildStockContext } from "../workflows/steps/stock-context"
 import { refreshPrintTrailWebhookSecretWorkflow } from "../workflows/refresh-print-trail-webhook-secret"
 import { syncPrintTrailOrderWorkflow } from "../workflows/sync-print-trail-order"
 import { scheduleFor } from "../lib/schedules"
@@ -90,6 +92,8 @@ export default async function printTrailSweepJob(container: MedusaContainer) {
       missedOrders: unlessStopped(sendMissedOrders),
       pendingStock: unlessStopped(runPendingStockSync),
       skuChecks: unlessStopped(runQueuedSkuChecks),
+      // Sends nothing to Print Trail.
+      legacyMetadata: runLegacyMetadata,
     },
     logger,
   )
@@ -141,6 +145,17 @@ export default async function printTrailSweepJob(container: MedusaContainer) {
       })
     } catch (e) {
       logger.error(`Print Trail sweep: queued SKU checks failed: ${(e as Error)?.message ?? e}`)
+    }
+  }
+
+  // 5. With the stock sync off, no full stock run moves the keys 0.2.0 kept
+  // in variant metadata, so the sweep does, once, under the stock lock.
+  async function runLegacyMetadata() {
+    if (options.stockSync.enabled) return
+    try {
+      await runLegacyMetadataScan(container.resolve(Modules.LOCKING), await buildStockContext(container))
+    } catch (e) {
+      logger.error(`Print Trail sweep: the variant metadata scan failed: ${(e as Error)?.message ?? e}`)
     }
   }
 

@@ -8,6 +8,7 @@ import {
   GetAttentionSchema,
   PostPrintTrailDismissSchema,
   PostPrintTrailResendSchema,
+  PostPrintTrailStockSyncSchema,
   PostPrintTrailWebhookSchema,
 } from "./admin/print-trail/validators"
 
@@ -44,6 +45,11 @@ export default defineMiddlewares({
       matcher: "/admin/print-trail/orders/:id/dismiss",
       methods: ["POST"],
       middlewares: [validateAndTransformBody(PostPrintTrailDismissSchema)],
+    },
+    {
+      matcher: "/admin/print-trail/stock-sync",
+      methods: ["POST"],
+      middlewares: [validateAndTransformBody(PostPrintTrailStockSyncSchema)],
     },
     {
       matcher: "/admin/print-trail/attention",

@@ -21,16 +21,20 @@ export const STATE_KEYS = {
   watermark: "stock_watermark",
   pending: "stock_sync_pending",
   lastRun: "stock_last_run",
-  // Written only by the stock sync, under the stock lock.
+  // Written under the stock lock: by the stock sync, and by
+  // forgetUnmatchedSkus for a deleted variant's SKU.
   unmatched: "unmatched_skus",
-  // Written only by the SKU check: not-found results since the last sync.
+  // 0.2.0's list of the SKU check's not-found results. Read-only since
+  // 1.0.0 (the not-found checks are rows now): the SKU check only forgets
+  // SKUs from it, and the metadata scan deletes it once complete.
   skuCheckUnmatched: "sku_check_unmatched",
   // The SKU check's own failure count (apart from the stock sync's).
   skuCheckFailures: "sku_check_failures",
   // Re-sends and stock refreshes owed by SKU checks that changed to matched.
   skuCheckFollowUps: "sku_check_follow_ups",
-  // Variant ids the plugin turned backorders on for, so one that leaves
-  // Print Trail's profiles can still be switched off.
+  // The backorders the plugin turned on (Backordered): only those are ever
+  // switched off, and each one's reason is shown on the variant page.
+  // Written only under the stock lock (the stock sync and its metadata scan).
   backordered: "stock_backordered",
   // Consecutive failed runs: after STOCK_FAILURE_CAP the sweep stops retrying.
   failures: "stock_failures",
@@ -41,10 +45,14 @@ export const STATE_KEYS = {
   // leaves Print Trail's profiles loses it: { ids }.
   preOrderFlagged: "pre_order_flagged",
   // The one-off scan of every variant's metadata for the plugin's keys,
-  // spread over full runs: its cursor and counts (MetadataScan, stock-flow.ts).
+  // spread over full runs (or sweeps, with the stock sync off): its version,
+  // cursor and counts (MetadataScan, stock-flow.ts).
   metadataScan: "variant_metadata_scan",
 } as const
-export const BACKORDER_MARKER_KEY = "print_trail_backorder"
+// Where 0.2.0 and earlier kept the backorder's reason, in variant metadata.
+// Since 1.0.0 the reason is in stock_backordered; the metadata scan moves the
+// marker there and deletes it.
+export const LEGACY_BACKORDER_MARKER_KEY = "print_trail_backorder"
 
 // The store-facing pre-order flag in variant metadata: Print Trail's
 // publication date ("YYYY-MM-DD") while the SKU is on pre-order, or true
@@ -60,18 +68,35 @@ export function preOrderFieldOf(row: PtStockLevel | undefined): PreOrderField | 
   return typeof row.publicationDate === "string" && row.publicationDate.trim() ? row.publicationDate.trim() : true
 }
 
-// Why the plugin turned a variant's backorders on. The marker is `true` for
-// print-on-demand (as before) and "pre-order" for a pre-order product.
+// Why the plugin turned a variant's backorders on.
 export type BackorderReason = "print-on-demand" | "pre-order"
 
+// stock_backordered. `ids` is the only authority for which backorders the
+// plugin may switch off ("only turn off what the plugin turned on");
+// `reasons` maps each id to why, for display. A record from 0.2.0 has no
+// `reasons`. Written only under the stock lock.
+export type Backordered = { ids: string[]; reasons?: Record<string, BackorderReason> }
+
+// The legacy marker's value: `true` for print-on-demand, "pre-order" for a
+// pre-order product.
 export function readBackorderMarker(value: unknown): BackorderReason | null {
   if (value === true) return "print-on-demand"
   if (value === "pre-order") return "pre-order"
   return null
 }
 
-export const backorderMarkerValue = (reason: BackorderReason): true | "pre-order" =>
-  reason === "pre-order" ? "pre-order" : true
+// Why the plugin's backorder is on for this variant, or null when the plugin
+// doesn't track it (a store's own backorder, or a stale legacy marker). A
+// tracked id without a recorded reason reads the legacy marker, else
+// print-on-demand (all a tracked id meant before pre-orders).
+export function reasonFor(
+  record: Backordered | null | undefined,
+  variantId: string | null | undefined,
+  metadata: Record<string, unknown> | null | undefined
+): BackorderReason | null {
+  if (!variantId || !record?.ids?.includes(variantId)) return null
+  return record.reasons?.[variantId] ?? readBackorderMarker(metadata?.[LEGACY_BACKORDER_MARKER_KEY]) ?? "print-on-demand"
+}
 export const STOCK_FAILURE_CAP = 3
 
 // 10000 or more is print-on-demand: the warehouse part is written, never the
@@ -92,7 +117,6 @@ export type StockVariant = {
   profileId: string | null
   manageInventory: boolean
   allowBackorder: boolean
-  backorderMarker: BackorderReason | null // readBackorderMarker(metadata.print_trail_backorder)
   // metadata.print_trail_pre_order as stored (undefined when absent).
   preOrderField?: unknown
   inventory: {
@@ -111,11 +135,11 @@ export type StockPlan = {
   // One entry per id in backorderOn.
   backorderReason: Record<string, BackorderReason>
   backorderOff: string[]
-  // Variants the plugin doesn't track that still carry its backorder marker,
-  // and aren't being turned on: the marker alone is deleted, allow_backorder
-  // left as it is. Before 0.2.0 a switch-off on Medusa 2.19+ kept the marker
-  // (Medusa merges metadata there) and then untracked the variant.
-  staleMarkers: string[]
+  // The wanted reason of every variant whose plugin backorder is on after
+  // this run (turned on now, or tracked and still wanted), apart from
+  // conflicted items. A tracked variant whose reason changes isn't written
+  // again: only its reason in the record changes.
+  reasons: Record<string, BackorderReason>
   // SKUs whose row says pre-order (API 1.3.0). Absent when no row carries a
   // status key (an older Print Trail API): the stored record is left alone.
   preOrders?: PreOrderSku[]
@@ -169,10 +193,26 @@ type Candidate = {
   levels: StockVariant["inventory"][0]["levels"]
 }
 
-// `tracked` is the plugin's own record of the backorders it switched on. Only
-// those are ever switched off: the variant's marker is informational, since a
-// concurrent metadata write can lose it. An untracked variant's marker is
-// stale, so it is deleted (never the backorder flag).
+// Normalised SKU → the row whose status counts: the figure's row (the SKU's
+// first with a usable figure), else the SKU's first (a status holds without
+// a usable figure).
+export function statusBySku(levels: PtStockLevel[]): Map<string, PtStockLevel> {
+  const withFigure = new Map<string, PtStockLevel>()
+  for (const row of levels) {
+    const k = normaliseSku(row?.sku)
+    if (k && !withFigure.has(k) && figureOf(row.stock) !== null) withFigure.set(k, row)
+  }
+  const statusRow = new Map<string, PtStockLevel>()
+  for (const row of levels) {
+    const k = normaliseSku(row?.sku)
+    if (k && !statusRow.has(k)) statusRow.set(k, withFigure.get(k) ?? row)
+  }
+  return statusRow
+}
+
+// `tracked` is the plugin's own record of the backorders it switched on
+// (stock_backordered's ids). Only those are ever switched off, and a store's
+// own backorder (on, untracked) is never claimed.
 export function planStockSync(input: {
   levels: PtStockLevel[]
   variants: StockVariant[]
@@ -196,13 +236,7 @@ export function planStockSync(input: {
     }
   }
   for (const k of pt.keys()) unknownKeys.delete(k)
-  // The row whose status counts: the figure's row, else the SKU's first
-  // (a status holds without a usable figure).
-  const statusRow = new Map<string, PtStockLevel>()
-  for (const row of input.levels) {
-    const k = normaliseSku(row?.sku)
-    if (k && !statusRow.has(k)) statusRow.set(k, rowOf.get(k) ?? row)
-  }
+  const statusRow = statusBySku(input.levels)
   const hasStatus = input.levels.some((l) => l && typeof l === "object" && "status" in l)
   const only = input.onlySkus ? new Set(input.onlySkus.map(normaliseSku)) : null
   const locations = input.stockLocationIds?.length ? new Set(input.stockLocationIds) : null
@@ -213,7 +247,7 @@ export function planStockSync(input: {
     backorderOn: [],
     backorderReason: {},
     backorderOff: [],
-    staleMarkers: [],
+    reasons: {},
     matched: [],
     unmatched: [],
     unknown: [],
@@ -362,23 +396,20 @@ export function planStockSync(input: {
   for (const c of candidates) {
     if (duplicate.has(c.key)) continue
     if (c.reason) {
-      // On where it's off; on a variant the plugin already tracks, written
-      // again only to change the marker's reason. A store's own backorder
-      // (on, untracked) is never claimed.
-      const remark = tracked.has(c.v.id) && c.v.backorderMarker !== null && c.v.backorderMarker !== c.reason
       // A conflicting item's variants are left as they are.
-      if ((!c.v.allowBackorder || remark) && !conflicted.has(c.item.inventoryItemId)) {
+      if (conflicted.has(c.item.inventoryItemId)) continue
+      // On where it's off. A store's own backorder (on, untracked) is never
+      // claimed; a tracked one only has its reason recorded.
+      if (!c.v.allowBackorder) {
         plan.backorderOn.push(c.v.id)
         plan.backorderReason[c.v.id] = c.reason
+        plan.reasons[c.v.id] = c.reason
+      } else if (tracked.has(c.v.id)) {
+        plan.reasons[c.v.id] = c.reason
       }
     } else {
       off(c.v)
     }
-  }
-
-  const turnedOn = new Set(plan.backorderOn)
-  for (const v of seen) {
-    if (v.backorderMarker !== null && !tracked.has(v.id) && !turnedOn.has(v.id)) plan.staleMarkers.push(v.id)
   }
 
   if (hasStatus) {
@@ -448,15 +479,21 @@ export function shortfallSkus(shortfall: unknown): string[] {
   )
 }
 
-// The unmatched SKUs for the health page: the last stock sync's list plus the
-// SKU check's not-found results. Two keys, so neither writer clobbers the
-// other.
-export async function readUnmatchedSkus(state: {
+// What readUnmatchedSkus reads; PrintTrailModuleService satisfies it.
+export type UnmatchedSkuStore = {
   getState<T>(key: string): Promise<T | null>
-}): Promise<string[]> {
-  const stock = (await state.getState<{ skus: string[] }>(STATE_KEYS.unmatched))?.skus ?? []
-  const checked = (await state.getState<{ skus: string[] }>(STATE_KEYS.skuCheckUnmatched))?.skus ?? []
-  return mergeUnmatched(stock, { add: checked })
+  // The SKUs whose stored check is not-found (print_trail_variant).
+  notFoundSkus(): Promise<string[]>
+}
+
+// The unmatched SKUs for the health page and the notice: the last stock
+// sync's list, the SKU checks' not-found results (which leave with the
+// variant's row), and the list 0.2.0's SKU check kept, while it exists.
+export async function readUnmatchedSkus(store: UnmatchedSkuStore): Promise<string[]> {
+  const stock = (await store.getState<{ skus: string[] }>(STATE_KEYS.unmatched))?.skus ?? []
+  const notFound = await store.notFoundSkus()
+  const legacy = (await store.getState<{ skus: string[] }>(STATE_KEYS.skuCheckUnmatched))?.skus ?? []
+  return mergeUnmatched(stock, { add: [...notFound, ...legacy] })
 }
 
 type StoredLine = { lineNumber?: string | null; product?: { sku?: string | null } | null }

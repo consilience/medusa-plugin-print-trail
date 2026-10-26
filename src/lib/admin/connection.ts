@@ -15,7 +15,7 @@ import { PRINT_TRAIL_PROVIDER_ID } from "../lines"
 import { detectLocking, LOCKING_CHECK_STATE_KEY, type LockingCheck } from "../locking-check"
 import { FALLBACK_METHODS } from "../rate-card"
 import { schedulesInForce } from "../schedules"
-import { readUnmatchedSkus } from "../stock"
+import { readUnmatchedSkus, type UnmatchedSkuStore } from "../stock"
 import { TEAM_CODE_STATE_KEY, type StateStore, type TeamCodeState } from "../team-code"
 import { knownSecrets, readWebhookSecrets, storeWebhookSecret } from "../webhook-secret"
 import {
@@ -42,7 +42,7 @@ export type ConnectionDeps = {
   // for the read-only status; client is the normal one.
   client: ConnectionClient | null
   statusClient: ConnectionClient | null
-  state: StateStore
+  state: StateStore & UnmatchedSkuStore
   locking: LockingView | null
   ptShippingOptionCount: number
   env?: NodeJS.ProcessEnv

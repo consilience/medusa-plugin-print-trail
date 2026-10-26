@@ -14,7 +14,7 @@ Use Node 22 (`.nvmrc`), 22.22.0 or later: the dev dependencies are Medusa 2.22.1
 | `npm run dev` | `medusa plugin:develop`: watch mode, publishing into a local store through yalc. |
 | `npm run lint` | `medusa lint`. |
 | `npm run typecheck` | `tsc --noEmit` for the server, the admin and the staging checklist. |
-| `npm run check:package` | `scripts/check-package.mjs`, run after a build. It checks what `npm pack` would ship: every `exports` target present, the README, changelog and `LICENSE` included, no tests, mock, integration tests or `CONTRIBUTING.md`, no comments in the compiled server code, no binary file in it, and no internal reference in any packed file's name or text (text is decided by content, not extension). The terms are below. |
+| `npm run check:package` | `scripts/check-package.mjs`, run after a build. It checks what `npm pack` would ship: every `exports` target present, the README, changelog and `LICENSE` included, no tests, mock, integration tests or `CONTRIBUTING.md`, no comments in the compiled server code or its declaration files (triple-slash directives included), no declaration file naming a package that isn't a peer dependency or a dependency (Node's own modules are allowed), or a path into `node_modules` or an absolute path, no binary file in the server code, and no internal reference in any packed file's name or text (text is decided by content, not extension). The terms are below. |
 | `npm run check:repo` | `scripts/check-repo.mjs`: the same terms over the name and text of every tracked file as the index holds it (`git ls-files --stage`, so staged changes are checked and unstaged ones aren't; binary files are listed, not scanned). |
 | `npm run test:unit` | Jest unit tests (`src/**/__tests__/*.unit.spec.ts`). |
 | `npm run test:integration:modules` | Module integration tests against a local Postgres. |
@@ -43,12 +43,23 @@ DB_HOST=localhost DB_USERNAME=<pg user> DB_PASSWORD=<pg password> npm run test:i
 DB_HOST=localhost DB_USERNAME=<pg user> DB_PASSWORD=<pg password> npm run test:integration:http
 ```
 
-- **The HTTP harness** boots a real Medusa app from `integration-tests/http/app` with the plugin loaded from its build, against the bundled mock on `127.0.0.1:4310`. It loads `.medusa/server`, so `test:integration:http` runs `npm run build` first.
+- **The HTTP harness** boots a real Medusa app from `integration-tests/http/app` with the plugin loaded from its build, against the bundled mock on `127.0.0.1:4310`. It loads `.medusa/server`, so `test:integration:http` runs `npm run build` first. Each spec file boots its own app in the one Jest process, and not all of an app's memory is given back when it shuts down, so the script raises Node's heap limit to 4 GB. A test that waits for the SKU check queue (`settleSkuChecks`) fails if the queue hasn't drained within 15 seconds.
 - **`DB_HOST=localhost`, not `127.0.0.1`, for the test runner.** Medusa's test runner turns on SSL whenever the database URL doesn't contain `localhost`, and a plain local Postgres refuses SSL. The mock is the other way round: use `127.0.0.1` for it, because `localhost` can resolve to another process.
-- **`REDIS_URL`** (for example `redis://localhost:6379`) switches the harness to Redis locking and turns on the concurrent-send test. Without it, that test is skipped.
+- **`REDIS_URL`** (for example `redis://localhost:6379`) switches the harness to Redis locking and turns on the concurrent-send test. Without it, that test is skipped. Each spec file's app takes its locks under its own Redis namespace, so a lock an app held when it shut down doesn't hold up the next file.
 - **`npm run test:staging`** runs a smoke test against Print Trail staging by hand. It needs `PT_STAGING_BASE_URL`, `PT_STAGING_CHANNEL_ID`, `PT_STAGING_API_TOKEN` and `PT_STAGING_SKUS` (comma-separated SKUs the staging channel can order), and refuses any host that isn't `https` under `consilstaging.com`, or is a `printtrail.com` host. With none of the variables set it is skipped. Its orders are numbered `CI-<run id>-<attempt>-<n>` (locally `CI-local<timestamp>-<n>`) and cancelled at the end.
 
 No test, script or CI job reaches Print Trail production.
+
+### The package's exports
+
+`exports` in `package.json` lists each public entry point: `/config`, `/workflows`, `/modules/printTrail`, `/providers/print-trail`, `/stock`, `/shipping-options` and `/admin` (Medusa's admin bundler resolves it under both `require` and `import`), plus `/.medusa/server/src/modules/printTrail`, the path Medusa loads the module from when a store lists the plugin. Each entry point except `/admin` and the module's path has a `types` condition, listed first, naming its declaration file (`declaration: true` in `tsconfig.json`). There is no pattern, so nothing else under `.medusa/server` can be imported, and a file that isn't an entry point can change in any release. `src/stock.ts` and `src/shipping-options.ts` re-export what a store may use from `src/lib`. `src/__tests__/public-api.unit.spec.ts` checks the list.
+
+`scripts/install-test.sh <tgz> <medusa version>` installs a packed tarball with that version of Medusa into a new temporary project, as a store would (no `--legacy-peer-deps`), checks that the project's `@medusajs/framework` and `@medusajs/medusa` are that version, and runs `scripts/check-exports.cjs` there. It checks that every entry point resolves and loads, that `/admin` resolves under `require` and `import`, that Medusa's own plugin resolution finds the module and the admin build, and that a deep import of an internal file fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`. Then it type-checks `scripts/consumer-fixture/consumer.ts`, a store's own code using each entry point, with TypeScript 5.9.3, `--strict` and `moduleResolution` `node16` and `bundler`: with `skipLibCheck` it must compile (its `@ts-expect-error` lines fail if a type has become `any`), `deep-import.ts` must give TS2307, and without `skipLibCheck` no error may be in the package's declarations (Medusa's own have some, which are counted). The project is removed afterwards.
+
+```bash
+npm run build && npm pack
+scripts/install-test.sh medusa-plugin-print-trail-<version>.tgz 2.22.1
+```
 
 ### Staging checklist
 
@@ -103,7 +114,7 @@ On staging, `cancel-too-late` races the dispatch webhook: the script cancels the
 
 ### CI
 
-- `.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: lint, typecheck, the repository check, unit tests, build, package check, then the module and HTTP integration tests, with Postgres 16 and Redis 7 services. It has no Print Trail credentials. The two checks read the maintainers' term list from the `PT_DENY_TERMS` repository secret (Settings, Secrets and variables, Actions), which `release.yml` uses too.
+- `.github/workflows/ci.yml` runs on pushes to `main` and on pull requests. Its `test` job runs lint, typecheck, the repository check, unit tests, build, package check, then the module and HTTP integration tests, with Postgres 16 and Redis 7 services. Its `install-test` job builds and packs the plugin and runs `scripts/install-test.sh` with Medusa 2.22.1. Neither has Print Trail credentials. The two checks read the maintainers' term list from the `PT_DENY_TERMS` repository secret (Settings, Secrets and variables, Actions), which `release.yml` uses too.
 - `.github/workflows/staging.yml` runs the staging smoke test. It is manual only (`workflow_dispatch` with a `confirm` input) and reads its credentials from the `staging` environment's secrets. Set up that environment with the four `PRINT_TRAIL_STAGING_*` secrets (`BASE_URL`, `CHANNEL_ID`, `API_TOKEN`, `SKUS`), and restrict its deployment branches to `main`, so a workflow file changed on another branch can't read them.
 
 ### Troubleshooting
@@ -130,7 +141,7 @@ On staging, `cancel-too-late` races the dispatch webhook: the script cancels the
 
 A pushed tag `v<version>` runs `.github/workflows/release.yml`, which has two jobs:
 
-- **`release`** runs lint, typecheck, the repository check, the unit tests, the build and the package check; checks that the tag, `package.json`'s `version` and a `## [<version>]` section of `CHANGELOG.md` agree; runs `npm pack`; installs the tarball into an empty project with Medusa 2.17.2 and with 2.22.1, resolving its exports; uploads the tarball as the run's `package` artifact; and creates a GitHub Release with the tarball attached and that changelog section as its notes, marked as a prerelease when the version has a `-`. It can write releases (`contents: write`) but can't request an OIDC token.
+- **`release`** runs lint, typecheck, the repository check, the unit tests, the build and the package check; checks that the tag, `package.json`'s `version` and a `## [<version>]` section of `CHANGELOG.md` agree; runs `npm pack`; runs `scripts/install-test.sh` on the tarball with Medusa 2.17.2 and with 2.22.1; uploads the tarball as the run's `package` artifact; and creates a GitHub Release with the tarball attached and that changelog section as its notes, marked as a prerelease when the version has a `-`. It can write releases (`contents: write`) but can't request an OIDC token.
 - **`publish`** runs after `release` succeeds, only when the repository variable `NPM_PUBLISH` is `true`, in the `npm` environment. It downloads the `package` artifact and publishes that tarball to npm (below). Its only permission is `id-token: write`, no other job has it, and it doesn't check out the repository or run any project script, so none of the dependencies `npm ci` installs runs where the token can be requested. The split keeps the token away from dependency code. It doesn't check the tarball independently: `release` builds it with those dependencies installed.
 
 Until `NPM_PUBLISH` is set, `publish` is skipped and a tag only makes the GitHub Release.
@@ -139,7 +150,7 @@ Until `NPM_PUBLISH` is set, `publish` is skipped and a tag only makes the GitHub
 
 These steps follow npm's docs (<https://docs.npmjs.com/trusted-publishers> and the `npm trust` command) and GitHub's, as of 2026-10-25. The package is published under the npm organisation `print-trail`. Its first public version is 1.0.0, and no earlier version was published to npm. `repository.url` in `package.json` must name this repository, since npm matches it against the repository the workflow runs in.
 
-1. **Publish the first version by hand.** A trusted publisher can only be added to a package that already exists on npm (the `npm trust` docs say so), so the first version is published from the npm account that will own the package, with two-factor authentication. Push its tag first: the release workflow tests the tarball and attaches it to the version's GitHub Release. Then publish that file:
+1. **Publish the first version by hand.** A trusted publisher can only be added to a package that already exists on npm (the `npm trust` docs say so), so a member of the npm organisation `print-trail` publishes the first version by hand, from their own account with two-factor authentication. Push its tag first: the release workflow tests the tarball and attaches it to the version's GitHub Release. Then publish that file:
 
    ```bash
    publish_release() {
@@ -159,7 +170,13 @@ These steps follow npm's docs (<https://docs.npmjs.com/trusted-publishers> and t
    publish_release <version>
    ```
 
-   Check that `npm whoami` names the owning account. `publish_release` downloads the tarball from the version's GitHub Release and stops, publishing nothing, if the download fails or the file's sha256 doesn't match the release's digest for it. Anything after the version goes to `npm publish`, so a prerelease (a version with a `-`) is `publish_release <version> --tag next`. npm asks for a one-time password (or add `--otp <code>`). Publishing a tarball runs no lifecycle scripts, so what goes up is what the workflow tested. npm 11 refuses a prerelease without `--tag`; npm 10, Node 22's own, would make it `latest`.
+   Check that `npm whoami` names your own account, a member of `print-trail`. `publish_release` downloads the tarball from the version's GitHub Release and stops, publishing nothing, if the download fails or the file's sha256 doesn't match the release's digest for it. Anything after the version goes to `npm publish`, so a prerelease (a version with a `-`) is `publish_release <version> --tag next`. npm asks for a one-time password (or add `--otp <code>`). Publishing a tarball runs no lifecycle scripts, so what goes up is what the workflow tested. npm 11 refuses a prerelease without `--tag`; npm 10, Node 22's own, would make it `latest`.
+
+   Then give the organisation's `developers` team read-write access to the package, so it doesn't rest on one account:
+
+   ```bash
+   npm access grant read-write print-trail:developers medusa-plugin-print-trail
+   ```
 
 2. **Set up the `npm` environment on GitHub.** In the repository's Settings, under Environments, create `npm`. Under Deployment branches and tags, choose Selected branches and tags and add a rule with Ref type Tag and the pattern `v*`, so only a `v*` tag can run the `publish` job. A required reviewer (with Prevent self-review) makes each publish wait for an approval; a public repository has them on any GitHub plan. Then limit who can create `v*` tags with a tag ruleset (Settings, Rulesets, New ruleset, New tag ruleset): target `v*`, turn on Restrict creations, give bypass to whoever releases, and make it Active.
 

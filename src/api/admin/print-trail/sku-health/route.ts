@@ -38,7 +38,8 @@ export async function GET(req: AuthenticatedMedusaRequest, res: MedusaResponse) 
       break
     }
   }
-  const { problems, unchecked } = skuProblems(variants)
+  const rows = await service.variantRows(variants.map((v) => v.id))
+  const { problems, unchecked } = skuProblems(variants, rows)
   const body: SkuHealthView = {
     unmatched,
     problems,

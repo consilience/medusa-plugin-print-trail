@@ -6,9 +6,31 @@ package uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+**Upgrading from 0.2.0 (and 0.1.x).** From 0.1.x, first follow 0.2.0's upgrade note below (the package was renamed). Then:
+
+1. Run `npx medusa db:migrate`. There is one new table, `print_trail_variant`.
+2. Change any import of the plugin's internal files. `medusa-plugin-print-trail/lib/stock-request` is now `medusa-plugin-print-trail/stock`, with the same names. `/lib/admin/shipping-options` and `/lib/admin/shipping-options-routes` are now `/shipping-options`: `createInput` is `printTrailShippingOptionInput`, `methodsFor` is `printTrailShippingMethods`, and `validateRateCard` is unchanged. Any other deep import no longer resolves; the README's "Package entry points" lists what can be imported. Open an issue if you need something that isn't there.
+3. Nothing to do for the data. The first full stock sync (or, with the stock sync off and the plugin connected, the sweep) moves `print_trail_sku_check` and `print_trail_backorder` out of variant metadata, with 0.2.0's one-off scan of every variant's metadata and its limits (up to 50,000 variants per run, and no new page once the run has taken five minutes). Until a variant is reached, its old keys are still read, so no SKU check or backorder is lost. Each variant that carried a key gets one metadata write, which sends `product-variant.updated`: a store's own subscribers (search indexing, say) see one event per such variant. The plugin's SKU check sees them too: variants whose old check was "Couldn't check", or whose SKU has changed since, are checked again with Print Trail, and the rest make no call. Storefront code that read either key should use `allow_backorder` and `print_trail_pre_order` instead.
+4. TypeScript declarations now ship, so a store's `tsc` checks its use of the plugin.
+
+### Added
+
+- **Sync stock now** on Settings → Print Trail runs a full stock sync at once, and says whether it ran or was deferred to the next sweep because another stock sync held the lock. It is `POST /admin/print-trail/stock-sync` and `requestPrintTrailStockSyncWorkflow`.
+- Public entry points for what stores imported from internal files: `medusa-plugin-print-trail/stock` (`requestStockSync`, `describeStockResult`) and `medusa-plugin-print-trail/shipping-options` (`printTrailShippingMethods`, `validateRateCard`, `printTrailShippingOptionInput`, and the `RateCard` and `ValidationIssue` types).
+- TypeScript declarations for every entry point but `/admin`, for `moduleResolution` `node16`, `nodenext` or `bundler`.
+
 ### Changed
 
 - The package is no longer private, so it can be published to npm. The README installs it from npm (`npm install medusa-plugin-print-trail`), and `package.json` has a shorter description, a homepage and a page for reporting problems.
+- **`exports` lists each entry point** instead of the `./*`, `./modules/*` and `./providers/*` patterns, so nothing else in the package can be imported (upgrade step 2).
+- **SKU checks are kept in the plugin's own table**, `print_trail_variant`, and the record of the backorders the plugin turned on now keeps why it did. Variant metadata, which store routes return, no longer carries `print_trail_sku_check` or `print_trail_backorder`: only `print_trail_pre_order` (written for the storefront) and `print_trail_sku` (the SKU override) are there.
+- **A variant's SKU check follows the stock sync.** With Print Trail API 1.3.0, whose stock list gives each product's status, a full stock sync brings each stored check up to date (matched, pre-order or inactive) without asking Print Trail again. A SKU Print Trail has started listing is checked again at the next sweep, which re-sends the orders waiting on it.
+- The README's Print Trail API table lists 1.4.0 (test-mode channels) and 1.5.0 (GTIN lengths). Neither needs a change in the plugin.
+
+### Fixed
+
+- **The unmatched-SKU notice kept a deleted variant's SKU for good.** Deleting a variant or a product now deletes its SKU checks, and their SKUs leave the notice at once, from the last stock sync's list of SKUs missing from Print Trail's stock list too, unless another variant was checked with the same SKU. A full stock sync forgets any variant deleted without an event, or whose product has left the Print Trail shipping profiles. A deleted variant's SKU waits for the next full stock sync (or Sync stock now) when the variant was never checked, when a stock sync was running as it was deleted, when many variants are deleted at once and the stock lock stays busy, and in a few other narrow cases. One that 0.2.0 had listed as unmatched waits until the upgrade's one-off scan completes (upgrade step 3).
+- **A variant's SKU check could stay stale**, Inactive or Not found after Print Trail had started listing the product, until the variant was saved again. The stock sync now brings it up to date (above).
 
 ## [0.2.0] - 2026-10-25
 

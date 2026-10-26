@@ -68,12 +68,23 @@ medusaIntegrationTestRunner({
         stocked: Number(level?.stocked_quantity),
         reserved: Number(level?.reserved_quantity ?? 0),
         allowBackorder: v.allow_backorder as boolean,
+        // The 0.2.0 backorder marker: since 1.0.0 the reason is kept in
+        // stock_backordered (reasonOf), never here.
         marker: (v.metadata ?? {}).print_trail_backorder as unknown,
         // 0.1.1: the store-facing flag.
         preOrder: (v.metadata ?? {}).print_trail_pre_order as unknown,
         metadata: (v.metadata ?? {}) as Record<string, unknown>,
       }
     }
+
+    // Why the plugin turned the variant's backorder on, from its own record;
+    // undefined when it doesn't track it.
+    const reasonOf = async (variantId: string) => {
+      const record = await printTrail(container()).getState("stock_backordered")
+      return record?.ids?.includes(variantId) ? (record.reasons?.[variantId] as string | undefined) : undefined
+    }
+    // The variant widget's stock block.
+    const viewStock = async (variantId: string) => (await api.get(`/admin/print-trail/variants/${variantId}`, admin)).data.stock
 
     // The per-parcel emails of one order, oldest first.
     const shipmentEmails = async (orderId: string) => {
@@ -180,8 +191,11 @@ medusaIntegrationTestRunner({
     })
 
     it("the stock sync writes the store-facing pre-order flag", async () => {
-      // beforeEach's run: the date, beside the backorder marker.
-      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ preOrder: PRE_ORDER_DATE, marker: "pre-order", allowBackorder: true })
+      // beforeEach's run: the date, and the backorder with its reason in the
+      // plugin's record rather than the variant's metadata.
+      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ preOrder: PRE_ORDER_DATE, marker: undefined, allowBackorder: true })
+      expect(await reasonOf(seed.variants.preOrder)).toBe("pre-order")
+      expect(await viewStock(seed.variants.preOrder)).toMatchObject({ pre_order_backorder: true, print_on_demand: false })
       expect((await variantOf(seed.variants.pt)).preOrder).toBeUndefined()
       // No publication date at Print Trail: true.
       delete mock().state.publicationDate[SKUS.preOrder]
@@ -233,7 +247,8 @@ medusaIntegrationTestRunner({
     })
 
     it("the stock sync keeps a 0-stock pre-order purchasable", async () => {
-      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ stocked: 0, allowBackorder: true, marker: "pre-order" })
+      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ stocked: 0, allowBackorder: true })
+      expect(await reasonOf(seed.variants.preOrder)).toBe("pre-order")
       // A store cart for it completes at 0 stock.
       const { orderId } = await placeOrder(api, seed, [{ variantId: seed.variants.preOrder, quantity: 1 }])
       await rowWhere(orderId, "the confirmed row", (r) => !!r.confirmed_at)
@@ -242,11 +257,13 @@ medusaIntegrationTestRunner({
       // stock job run by the test.
       mock().state.stock[SKUS.preOrder] = 5
       await mock().setSkuStatus(SKUS.preOrder, "active")
+      // The sync turns the backorder off before it untracks the variant and
+      // its reason, so both are waited for.
       await waitFor(async () => {
         const v = await variantOf(seed.variants.preOrder)
-        return !v.allowBackorder && v.stocked === 5 ? v : undefined
-      }, { what: "backorders off at stock 5" })
-      expect((await variantOf(seed.variants.preOrder)).marker).toBeUndefined()
+        return !v.allowBackorder && v.stocked === 5 && (await reasonOf(seed.variants.preOrder)) === undefined ? v : undefined
+      }, { what: "backorders off at stock 5, and untracked" })
+      expect(await viewStock(seed.variants.preOrder)).toMatchObject({ pre_order_backorder: false })
     })
 
     it("a limited pre-order's level adds back Medusa's reservation", async () => {
@@ -272,11 +289,12 @@ medusaIntegrationTestRunner({
       const service = printTrail(container())
       await service.setState("stock_backordered", { ids: [] })
       await updateProductVariantsWorkflow(container()).run({
-        input: { product_variants: [{ id: seed.variants.preOrder, allow_backorder: true, metadata: { print_trail_backorder: "" } }] },
+        input: { product_variants: [{ id: seed.variants.preOrder, allow_backorder: true }] },
       })
       await stockJob()
       expect(await variantOf(seed.variants.preOrder)).toMatchObject({ allowBackorder: true })
-      expect((await variantOf(seed.variants.preOrder)).marker).toBeFalsy()
+      expect(await reasonOf(seed.variants.preOrder)).toBeUndefined()
+      expect(await viewStock(seed.variants.preOrder)).toMatchObject({ pre_order_backorder: false, print_on_demand: false })
       // Never claimed, still flagged for the store.
       expect((await variantOf(seed.variants.preOrder)).preOrder).toBe(PRE_ORDER_DATE)
 
@@ -286,6 +304,25 @@ medusaIntegrationTestRunner({
       await stockJob()
       expect(await variantOf(seed.variants.preOrder)).toMatchObject({ allowBackorder: true, stocked: 3 })
       expect((await variantOf(seed.variants.preOrder)).preOrder).toBeUndefined()
+    })
+
+    // The plugin's backorder write sets allow_backorder alone, so on Medusa
+    // 2.17-2.18, where an update replaces a variant's metadata, it keeps the
+    // store's keys and the pre-order flag.
+    it("turning a backorder on keeps the variant's metadata", async () => {
+      const { preOrder } = seed.variants
+      await printTrail(container()).setState("stock_backordered", { ids: [] })
+      await updateProductVariantsWorkflow(container()).run({
+        input: { product_variants: [{ id: preOrder, allow_backorder: false, metadata: { ...(await variantOf(preOrder)).metadata, store_key: "kept" } }] },
+      })
+      await settleSkuChecks(container())
+      expect(await variantOf(preOrder)).toMatchObject({ allowBackorder: false, preOrder: PRE_ORDER_DATE })
+
+      await stockJob()
+      const v = await variantOf(preOrder)
+      expect(v.allowBackorder).toBe(true)
+      expect(await reasonOf(preOrder)).toBe("pre-order")
+      expect(v.metadata).toMatchObject({ store_key: "kept", print_trail_pre_order: PRE_ORDER_DATE })
     })
 
     it("a confirm into an out-of-stock back-order is attention, not a retry loop", async () => {
@@ -381,51 +418,87 @@ medusaIntegrationTestRunner({
       expect(version.version).toBe("1.3.0")
     })
 
-    // 0.1.x on Medusa 2.19+ left a deleted key out of the write, which
-    // Medusa's merge kept, then forgot the variant. The first full sync after
-    // the upgrade deletes the keys in scope and, through its one-off scan,
-    // outside it, and leaves the backorder flag and other keys alone.
-    it("the first full stock sync deletes stale keys from 0.1.x", async () => {
+    // A store upgraded from 0.2.0 (or 0.1.x): the SKU checks and backorder
+    // reasons are still in variant metadata, which store routes return, with
+    // no print_trail_variant rows; and 0.1.x on Medusa 2.19+ left a
+    // pre-order flag on a variant it then forgot. One full stock sync moves
+    // the checks into rows and the reasons into stock_backordered, and
+    // deletes the keys, leaving the store's own and print_trail_sku alone.
+    it("the first full stock sync after upgrading moves the plugin's keys out of variant metadata", async () => {
       const service = printTrail(container())
-      const stale = [seed.variants.pt, seed.variants.plain]
-      for (const key of ["stock_backordered", "pre_order_flagged"]) {
-        const ids: string[] = (await service.getState(key))?.ids ?? []
-        await service.setState(key, { ids: ids.filter((id) => !stale.includes(id)) })
+      const at = "2026-10-01T00:00:00.000Z"
+      const legacy = (sku: string, status: string) => ({ sku, status, checked_at: at })
+      const { pt, pt2, pod, preOrder, unknownSku, plain } = seed.variants
+      const seeded: Record<string, Record<string, unknown>> = {
+        [pt]: { print_trail_sku: SKUS.pt, print_trail_sku_check: legacy(SKUS.pt, "matched") },
+        [unknownSku]: { print_trail_sku_check: legacy(SKUS.unknownSku, "not-found") },
+        // Tracked: the marker is its reason.
+        [pod]: { print_trail_backorder: true },
+        [preOrder]: { print_trail_backorder: "pre-order" },
+        // Untracked, with the store's own backorder on.
+        [pt2]: { print_trail_backorder: true },
+        // Outside Print Trail's profiles.
+        [plain]: { print_trail_pre_order: "2020-01-01" },
       }
-      // beforeEach's run has done the scan.
-      expect(await service.getState("variant_metadata_scan")).toBeTruthy()
-      await service.setState("variant_metadata_scan", null)
-      for (const id of stale) {
+      for (const [id, keys] of Object.entries(seeded)) {
         await updateProductVariantsWorkflow(container()).run({
           input: {
             product_variants: [
-              {
-                id,
-                metadata: { ...(await variantOf(id)).metadata, store_key: "kept", print_trail_backorder: true, print_trail_pre_order: "2020-01-01" },
-              },
+              { id, ...(id === pt2 ? { allow_backorder: true } : {}), metadata: { ...(await variantOf(id)).metadata, store_key: "kept", ...keys } },
             ],
           },
         })
-        expect(await variantOf(id)).toMatchObject({ marker: true, preOrder: "2020-01-01", allowBackorder: false })
       }
-      // The saves' SKU checks, so none writes over the sync.
+      // The saves' SKU checks (each finds the legacy check current), then
+      // 0.2.0's state: no rows, a record without reasons, the SKU check's
+      // notice, and a completed scan.
       await settleSkuChecks(container())
+      await service.forgetVariants({ variantIds: Object.keys(seeded) })
+      await service.setState("stock_backordered", { ids: [pod, preOrder].sort() })
+      await service.setState("sku_check_unmatched", { skus: [SKUS.unknownSku] })
+      await service.setState("variant_metadata_scan", { after: "zzz", scanned: 9, preOrderFields: 0, markers: 0, startedAt: at, updatedAt: at, completedAt: at })
+      expect(await variantOf(pt)).toMatchObject({ metadata: expect.objectContaining({ print_trail_sku_check: legacy(SKUS.pt, "matched") }) })
 
       await stockJob()
-      for (const id of stale) {
-        const v = await variantOf(id)
-        expect(v).toMatchObject({ marker: undefined, preOrder: undefined, allowBackorder: false })
-        expect(v.metadata).toMatchObject({ store_key: "kept" })
+      for (const id of Object.keys(seeded)) {
+        const { metadata } = await variantOf(id)
+        expect(metadata).not.toHaveProperty("print_trail_sku_check")
+        expect(metadata).not.toHaveProperty("print_trail_backorder")
+        expect(metadata).toMatchObject({ store_key: "kept" })
       }
-      // One short page read every variant.
+      expect((await variantOf(pt)).metadata).toMatchObject({ print_trail_sku: SKUS.pt })
+      expect((await variantOf(plain)).preOrder).toBeUndefined()
+      // In scope, the run keeps the pre-order flag right.
+      expect((await variantOf(preOrder)).preOrder).toBe(PRE_ORDER_DATE)
+
+      // The checks are rows, adopted from metadata, and the variant view shows them.
+      const rows = await service.variantRows([pt, unknownSku])
+      expect(rows.get(pt)).toMatchObject({ check_sku: SKUS.pt, check_status: "matched", check_source: "metadata" })
+      expect(rows.get(unknownSku)).toMatchObject({ check_status: "not-found", check_source: "metadata" })
+      expect((await api.get(`/admin/print-trail/variants/${pt}`, admin)).data).toMatchObject({
+        check: { sku: SKUS.pt, status: "matched" },
+        check_current: true,
+      })
+      // sku_check_unmatched is gone, and the notice still lists the SKU.
+      expect(await service.getState("sku_check_unmatched")).toBeNull()
+      expect((await api.get("/admin/print-trail/sku-health", admin)).data.unmatched).toContain(SKUS.unknownSku)
+
+      // Reasons in the record; the untracked backorder left on and unclaimed.
+      expect(await service.getState("stock_backordered")).toEqual({
+        ids: [pod, preOrder].sort(),
+        reasons: { [pod]: "print-on-demand", [preOrder]: "pre-order" },
+      })
+      expect(await variantOf(pt2)).toMatchObject({ allowBackorder: true })
+      expect(await viewStock(pt2)).toMatchObject({ print_on_demand: false, pre_order_backorder: false })
+      expect(await viewStock(pod)).toMatchObject({ print_on_demand: true })
+
       expect(await service.getState("variant_metadata_scan")).toMatchObject({
-        after: expect.any(String),
+        version: 2,
+        markers: 3,
+        checks: 2,
         preOrderFields: 1,
-        markers: 1,
         completedAt: expect.any(String),
       })
-      // The pre-order variant keeps its own.
-      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ preOrder: PRE_ORDER_DATE })
     })
 
     // The harness has fewer variants than a page, so the scan above never
@@ -448,6 +521,38 @@ medusaIntegrationTestRunner({
         after = page.lastId
       }
       expect(read).toEqual(all)
+    })
+
+    // Version 2 over the real catalogue, one variant per page: the legacy
+    // check is adopted and deleted, the record completes, and every variant
+    // is read once.
+    it("the version 2 scan pages through every variant on Postgres", async () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { scanPluginMetadata } = require(path.resolve(__dirname, "../../.medusa/server/src/lib/stock-flow.js"))
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { buildStockContext } = require(path.resolve(__dirname, "../../.medusa/server/src/workflows/steps/stock-context.js"))
+      const service = printTrail(container())
+      const { plain } = seed.variants
+      const check = { sku: "HAR-PLAIN", status: "not-found", checked_at: "2026-10-01T00:00:00.000Z" }
+      await updateProductVariantsWorkflow(container()).run({
+        input: { product_variants: [{ id: plain, metadata: { ...(await variantOf(plain)).metadata, print_trail_sku_check: check } }] },
+      })
+      await settleSkuChecks(container())
+      await service.setState("variant_metadata_scan", null)
+      const query = container().resolve(ContainerRegistrationKeys.QUERY)
+      const { data } = await query.graph({ entity: "product_variant", fields: ["id"], pagination: { order: { id: "ASC" } } })
+
+      const ctx = await buildStockContext(container())
+      await scanPluginMetadata(ctx, { inScope: null, ptProducts: null, startedAt: new Date() }, { pageSize: 1, maxPages: data.length + 1, deadlineMs: 300_000 })
+      expect(await service.getState("variant_metadata_scan")).toMatchObject({
+        version: 2,
+        scanned: data.length,
+        checks: 1,
+        completedAt: expect.any(String),
+      })
+      expect((await variantOf(plain)).metadata).not.toHaveProperty("print_trail_sku_check")
+      // Outside Print Trail's profiles, but the scope was unknown: adopted.
+      expect((await service.variantRows([plain])).get(plain)).toMatchObject({ check_sku: "HAR-PLAIN", check_status: "not-found", check_source: "metadata" })
     })
   },
 })

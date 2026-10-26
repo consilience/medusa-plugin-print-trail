@@ -1,7 +1,7 @@
 import { InMemoryLockingProvider } from "@medusajs/locking/dist/providers/in-memory"
 import { startMockPrintTrail, type MockPrintTrail } from "../../../dev/mock-print-trail"
 import { PrintTrailClient } from "../../modules/printTrail/client/client"
-import { SKU_CHECK_KEY, type CheckVariant, type SkuCheck, type SkuCheckPort } from "../sku-check"
+import type { CheckVariant, SkuCheck, SkuCheckPort } from "../sku-check"
 import {
   drainSkuChecks,
   runSkuCheckQueue,
@@ -44,11 +44,12 @@ class FakePort implements SkuCheckPort {
     return this.variants.filter((v) => input.variantIds?.includes(v.id))
   }
   failWrites = false
-  async writeCheck(variantId: string, check: SkuCheck) {
+  async writeCheck(variant: { id: string; productId: string }, check: SkuCheck) {
     if (this.failWrites) throw new Error("write failed")
-    this.writes.push({ variantId, check })
-    const v = this.variants.find((x) => x.id === variantId)!
-    v.metadata = { ...(v.metadata ?? {}), [SKU_CHECK_KEY]: check }
+    this.writes.push({ variantId: variant.id, check })
+    const v = this.variants.find((x) => x.id === variant.id)!
+    v.check = check
+    v.hasRow = true
   }
   async blockedRows() {
     return []
@@ -68,7 +69,7 @@ let ctx: SkuCheckQueueContext
 
 const validateCalls = () => mock.state.requests.filter((r) => r.path.endsWith("/products/validate-skus")).length
 const variants = (n: number) =>
-  Array.from({ length: n }, (_, i) => ({ id: `v${i}`, sku: `SKU-${i}`, metadata: null, profileId: PT }))
+  Array.from({ length: n }, (_, i): CheckVariant => ({ id: `v${i}`, sku: `SKU-${i}`, metadata: null, profileId: PT, productId: "prod_1", check: null, hasRow: false }))
 
 beforeEach(async () => {
   mock = await startMockPrintTrail({ token: "secret-token", channelId: "acme-medusa1", skus: { "SKU-1": 3, "SKU-2": 4 } })

@@ -38,6 +38,8 @@ Print Trail sends its API version with every response. The settings page shows t
 | 1.1.0 | The webhook secret returned by webhook registration, Rotate secret, `confirmedAt` on orders, and typed duplicate-create 409s (fewer lookups by order number). |
 | 1.2.0 | Production since 2026-10-20: webhook URLs must be `https` on a public host, an unknown channel ID is a 401, inactive channels and teams are refused, `Retry-After` on 429s, a `reference` on 500s, and input limits. Nothing to enable; see Troubleshooting. |
 | 1.3.0 | Pre-order products (below; production since 2026-10-20): pre-order lines held and released by Print Trail, `backOrderReason` and `sentToWarehouseAt` on fulfilments, a confirm that becomes a back-order instead of a stock refusal, and pre-order status, dates and limits on stock. |
+| 1.4.0 | Test-mode channels: orders and webhooks carry a `mode` of `live` or `test`, and a test channel's orders are checked and stored but never reach the warehouse, so they stay processing with no dispatch. The plugin doesn't read `mode`, so nothing changes. |
+| 1.5.0 | GTINs at a consistent length (a book's is its ISBN-13, a UPC-A's its 13-digit form), with `ean` and `upc` filled in more often. The plugin doesn't read or send GTINs, so nothing changes. |
 
 ## Install
 
@@ -183,6 +185,8 @@ Every option of the `plugins` entry, as `resolvePluginOptions` reads it:
    - **The option's fulfilment set must be linked to a stock location.** Otherwise the plugin can't create Medusa fulfilments when Print Trail dispatches.
    - With managed inventory, the item needs a reservation, which Medusa makes at checkout when the variant has an inventory level at a location the sales channel uses.
 4. **SKUs.** A variant is matched to Print Trail by its SKU, case-insensitively. When Print Trail's SKU differs, set the variant metadata key `print_trail_sku` (the Print Trail panel on the variant page edits it). Saving a variant or moving a product into a Print Trail profile checks the SKU with Print Trail. Settings → Print Trail lists unmatched SKUs. A SKU is unmatched when Print Trail's stock list doesn't have it; a sold-out product is still listed, with 0. Print Trail's stock list also includes inactive products without marking them, so a variant matched to an inactive Print Trail product counts as matched and its stock is synced. The variant's SKU check shows it as Inactive, and Print Trail may refuse orders for it at confirm.
+   - **Sync stock now** on the same page runs a full stock sync at once, as the daily job does, and says whether it ran or was deferred: while another stock sync holds the lock, the request waits for the next sweep. With Print Trail API 1.3.0, whose stock list gives each product's status, a full stock sync also brings each variant's SKU check up to date (matched, pre-order or inactive), and a SKU Print Trail has started listing is checked again at the next sweep, which re-sends the orders waiting on it.
+   - Deleting a variant or a product removes its SKU checks, and their SKUs leave the unmatched list at once, unless another variant was checked with the same SKU. A deleted variant's SKU stays until the next full stock sync when the variant was never checked, when a stock sync was running as it was deleted, when many variants are deleted at once and the stock lock stays busy, and in a few other narrow cases. After an upgrade from 0.2.0, a SKU that 0.2.0 had listed as unmatched stays until the upgrade's one-off scan of variant metadata completes (the CHANGELOG's upgrade note). **Sync stock now** clears it straight away, once no other stock sync is running.
 
 ### The webhook secret
 
@@ -337,6 +341,8 @@ Apply this to any store before taking live orders.
   ```
 
   The Postgres locking provider is unsupported: it never reclaims an expired lock with no owner, and its insert race lets two holders through. The plugin checks the locking provider at startup. It logs an error for the Postgres provider, and the settings page warns when locking is in-memory or Postgres.
+
+  With Redis locking, a lock held by a process that stops mid-run (a restart or a crash) stays until it expires, and that work waits until then: the SKU check for up to 5 minutes, an order's sends and updates for up to 10, and the stock sync for up to 15. Nothing is lost: queued SKU checks, the order and any stock sync requested meanwhile run once the lock has expired.
 - **Use a Redis event bus** (`@medusajs/medusa/event-bus-redis`). The in-memory bus can drop events across restarts. The sweep finds orders whose `order.placed` never arrived, but only within `reconcile.lookbackDays`.
 - **Switch payments and Print Trail credentials together.** Live payments with staging credentials send real orders nowhere. Test payments with production credentials send test orders to be made.
 - **Clear or cancel test orders first.** The sweep sends any uncancelled order with Print Trail lines and no Print Trail order from the last `reconcile.lookbackDays` days. Test orders left open when production credentials go in will be sent.
@@ -345,6 +351,70 @@ Apply this to any store before taking live orders.
 - **Admin access.** The plugin has no permissions of its own. Any admin user can use its pages and admin routes.
 
 ## Developer surface
+
+### Package entry points
+
+| Import | What it holds |
+|---|---|
+| `medusa-plugin-print-trail/config` | `printTrailOptionsFromEnv`, `resolvePluginOptions` and the option types, for `medusa-config.ts`. |
+| `medusa-plugin-print-trail/providers/print-trail` | The fulfilment provider, for the fulfilment module's `providers`. |
+| `medusa-plugin-print-trail/modules/printTrail` | The module (`PRINT_TRAIL_MODULE`, and `linkable` for links of your own). |
+| `medusa-plugin-print-trail/workflows` | The workflows, their ids and the hook input types (below). |
+| `medusa-plugin-print-trail/stock` | `requestStockSync`, the entry point every stock trigger uses (it takes the stock lock, and a held lock defers the request to the sweep), and `describeStockResult`. |
+| `medusa-plugin-print-trail/shipping-options` | `printTrailShippingMethods`, `validateRateCard` and `printTrailShippingOptionInput`, to create Print Trail shipping options from a script. |
+| `medusa-plugin-print-trail/admin` | The admin extensions, for Medusa's admin build. |
+| `medusa-plugin-print-trail/package.json` | The package's own `package.json`. |
+
+`medusa-plugin-print-trail/.medusa/server/src/modules/printTrail` is also exported, because Medusa loads the module from that path; don't import it. Nothing else in the package can be imported: a file that isn't listed here can change in any release.
+
+TypeScript declarations ship for every entry point but `/admin`. They resolve with `moduleResolution` `node16`, `nodenext` or `bundler`, not `node10`, which can't resolve Medusa's own subpaths either.
+
+A store's own job asking for a SKU-only sync, and a script creating a Print Trail shipping option:
+
+```ts
+// src/jobs/refresh-new-titles.ts
+import type { MedusaContainer } from "@medusajs/framework/types"
+import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
+import { describeStockResult, requestStockSync } from "medusa-plugin-print-trail/stock"
+
+export default async function refreshNewTitles(container: MedusaContainer) {
+  const result = await requestStockSync(container, { trigger: "schedule", skus: ["9781234567897"] })
+  container.resolve(ContainerRegistrationKeys.LOGGER).info(`New titles' stock: ${describeStockResult(result)}`)
+}
+
+export const config = { name: "refresh-new-titles", schedule: "0 * * * *" }
+```
+
+```ts
+// src/scripts/create-print-trail-option.ts: npx medusa exec ./src/scripts/create-print-trail-option.ts
+import type { ExecArgs } from "@medusajs/framework/types"
+import { createShippingOptionsWorkflow } from "@medusajs/medusa/core-flows"
+import {
+  printTrailShippingMethods,
+  printTrailShippingOptionInput,
+  validateRateCard,
+} from "medusa-plugin-print-trail/shipping-options"
+
+export default async function createPrintTrailOption({ container }: ExecArgs) {
+  const { codes } = await printTrailShippingMethods(container)
+  const checked = validateRateCard(
+    { method: "tracked", currency_code: "gbp", bands: [{ max_weight: 1000, prices: { gbp: 3.95 } }, { max_weight: null, prices: { gbp: 6.5 } }] },
+    codes
+  )
+  if (!checked.ok) throw new Error(checked.issues.map((i) => `${i.path}: ${i.message}`).join("; "))
+  const option = printTrailShippingOptionInput(
+    { name: "Print Trail Tracked", service_zone_id: "serzo_…", shipping_profile_id: "sp_…" },
+    checked.card
+  )
+  await createShippingOptionsWorkflow(container).run({ input: [option] })
+}
+```
+
+`printTrailShippingMethods` lists the shipping methods Print Trail offers the channel (`source: "fallback"` and a built-in list when it can't be reached). `printTrailShippingOptionInput` gives a calculated option with the Print Trail provider, the card as its data, and the store rules Medusa's own form sets.
+
+### Where the plugin keeps its data
+
+The plugin's records are in its own tables: its Print Trail orders and their timelines in `print_trail_order` and `print_trail_order_event`; the connection's state (the team code and the webhook secret, among others), the stock sync's bookkeeping (which backorders it turned on, and why) and the SKU check queue in `print_trail_state`; and each variant's SKU check in `print_trail_variant`. Variant metadata holds only `print_trail_pre_order`, which the stock sync writes for the storefront (Pre-order products, above), and `print_trail_sku`, the SKU override, which the plugin reads.
 
 ### Workflows
 
@@ -357,7 +427,8 @@ All exported from `medusa-plugin-print-trail/workflows`:
 | `cancelPrintTrailOrderWorkflow` | Carries a Medusa cancel to Print Trail. |
 | `amendPrintTrailOrderWorkflow` | Carries an order edit to Print Trail (`PUT …/lines` once confirmed, a re-sent draft before). |
 | `recordPrintTrailOrderChangeWorkflow` | Records an address change, refund or return on the timeline. |
-| `syncPrintTrailStockWorkflow` | Syncs stock levels from Print Trail. |
+| `syncPrintTrailStockWorkflow` | Syncs stock levels from Print Trail. It fails while another stock sync holds the lock; `requestPrintTrailStockSyncWorkflow` and `requestStockSync` (`/stock`) defer instead. |
+| `requestPrintTrailStockSyncWorkflow` | Sync stock now: a full sync, or only `{ skus }`, through `requestStockSync`. Its result's `status` is `completed`, `deferred` (to the next sweep), `disabled` or `failed`. |
 | `testPrintTrailConnectionWorkflow` | Test connection. |
 | `registerPrintTrailWebhookWorkflow` | Registers the webhook URL. |
 | `resetPrintTrailRetryWorkflow` | Resets a capped retry (used by Resend). |
@@ -450,6 +521,7 @@ Admin routes, all under `/admin/print-trail`:
 | `orders/:id/dismiss` | POST | Clear an attention code (Mark as resolved). |
 | `attention` | GET | Orders that need attention. |
 | `sku-health` | GET | Unmatched SKUs and the last stock run. |
+| `stock-sync` | POST | Sync stock now. Takes no body; returns `{ status, summary }`. |
 | `variants/:id` | GET | A variant's SKU check. |
 
 ## Troubleshooting
@@ -471,7 +543,7 @@ Admin routes, all under `/admin/print-trail`:
 ## Removing the plugin
 
 1. Remove the `plugins` entry and the Print Trail provider from the fulfilment providers in `medusa-config.ts`. Keep the manual provider. Delete or replace any shipping options that use `print-trail_print-trail` first.
-2. If you don't want the data, drop the plugin's tables: `print_trail_order`, `print_trail_order_event`, `print_trail_state`, and the order link table (Medusa names it `printtrail_print_trail_order_order_order`; `\dt *print_trail_order*` in psql lists it).
+2. If you don't want the data, drop the plugin's tables: `print_trail_order`, `print_trail_order_event`, `print_trail_state`, `print_trail_variant`, and the order link table (Medusa names it `printtrail_print_trail_order_order_order`; `\dt *print_trail_order*` in psql lists it).
 3. Remove the webhook from the channel in the Print Trail app.
 
 Fulfilments, shipments and stock levels the plugin wrote into Medusa stay.

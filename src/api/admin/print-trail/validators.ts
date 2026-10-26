@@ -15,6 +15,10 @@ export const PostPrintTrailDismissSchema = z.object({
 })
 export type PostPrintTrailDismissType = z.infer<typeof PostPrintTrailDismissSchema>
 
+// "Sync stock now" takes no body: always a full sync.
+export const PostPrintTrailStockSyncSchema = z.object({}).strict()
+export type PostPrintTrailStockSyncType = z.infer<typeof PostPrintTrailStockSyncSchema>
+
 export const GetAttentionSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),

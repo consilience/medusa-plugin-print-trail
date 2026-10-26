@@ -68,23 +68,14 @@ jobs:
       - name: Pack
         id: pack
         run: echo "tgz=$(npm pack --ignore-scripts --silent | tail -n 1)" >> "$GITHUB_OUTPUT"
-      - name: Install test (the export map, from a consumer)
+      - name: Install test (exports and declarations, from a consumer)
         env:
           TGZ: ${{ github.workspace }}/${{ steps.pack.outputs.tgz }}
         run: |
-          # The peer range's floor and the Medusa the tests run on.
+          # The peer range's floor and the Medusa the tests run on. No
+          # --legacy-peer-deps: a peer range a store can't satisfy fails the release.
           for medusa in 2.17.2 2.22.1; do
-            dir="$RUNNER_TEMP/pt-install-$medusa"
-            mkdir -p "$dir" && cd "$dir"
-            npm init -y > /dev/null
-            # No --legacy-peer-deps: a peer range a store can't satisfy fails the release.
-            npm install "$TGZ" "@medusajs/framework@$medusa" "@medusajs/medusa@$medusa" --no-audit --no-fund
-            node -e '
-              const p = "medusa-plugin-print-trail"
-              for (const s of ["/providers/print-trail", "/modules/printTrail", "/workflows", "/config"]) console.log(require.resolve(p + s))
-              console.log(typeof require(p + "/config").printTrailOptionsFromEnv)
-            ' | tee "$RUNNER_TEMP/install-$medusa.txt"
-            test "$(tail -n 1 "$RUNNER_TEMP/install-$medusa.txt")" = "function"
+            scripts/install-test.sh "$TGZ" "$medusa"
           done
       # The install-tested tarball, for the publish job. Before the GitHub
       # Release, so a failed upload leaves no release behind and the job can be

@@ -226,16 +226,32 @@ export async function seedStore(container: MedusaContainer): Promise<Seed> {
 
 // Product and variant saves queue SKU checks that drain a second later. Wait
 // for the queue to empty, so the runner's database snapshot (taken before the
-// first test) doesn't cut off a drain mid-query.
+// first test) doesn't cut off a drain mid-query. A queue still full at the
+// deadline fails the test: a drain that never ran (its lock held elsewhere)
+// would otherwise leave the tests to run on unchecked variants.
 export async function settleSkuChecks(container: MedusaContainer, timeoutMs = 15_000): Promise<void> {
   const service = container.resolve("printTrail") as any
   const deadline = Date.now() + timeoutMs
+  const queued = async () =>
+    ((await service.listPrintTrailStates({}, { select: ["key"] })) as { key: string }[])
+      .map((r) => r.key)
+      .filter((key) => key.startsWith("sku_check:"))
   await new Promise((r) => setTimeout(r, 1500))
-  while (Date.now() < deadline) {
-    const rows: { key: string }[] = await service.listPrintTrailStates({}, { select: ["key"] })
-    if (!rows.some((r) => r.key.startsWith("sku_check:"))) break
+  let left = await queued()
+  while (left.length && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 200))
+    left = await queued()
+  }
+  if (left.length) {
+    // eslint-disable-next-line @medusajs/use-medusa-error-not-generic-error
+    throw new Error(`HTTP harness: SKU checks still queued after ${timeoutMs} ms: ${left.join(", ")}`)
   }
   // The drain's own writes (results, follow-ups) finish after the queue empties.
   await new Promise((r) => setTimeout(r, 500))
+}
+
+// Soft-deletes a variant in the database, with no workflow, so no
+// product-variant.deleted event fires: as a store's own script might.
+export async function softDeleteVariantQuietly(dbConnection: any, variantId: string): Promise<void> {
+  await dbConnection.raw(`update product_variant set deleted_at = now() where id = ?`, [variantId])
 }

@@ -1,7 +1,7 @@
 import { MedusaError } from "@medusajs/framework/utils"
 import { isLockBusy } from "../../lib/stock-request"
 import { patchVariantMetadata, type VariantMetadataStore } from "../../lib/variant-metadata"
-import { backorderPatches, listPluginMetadata, preOrderFieldPatches, staleMarkerPatches, toStockVariants } from "../steps/stock-context"
+import { backorderUpdates, legacyKeyPatches, listPluginMetadata, preOrderFieldPatches, toStockVariants } from "../steps/stock-context"
 
 // The shape query.graph returns for STOCK_VARIANT_FIELDS (2.17.2): numeric
 // columns can arrive as strings.
@@ -46,7 +46,6 @@ describe("toStockVariants", () => {
       profileId: "sp_pt",
       manageInventory: true,
       allowBackorder: true,
-      backorderMarker: "print-on-demand",
       inventory: [
         {
           inventoryItemId: "iitem_1",
@@ -58,34 +57,24 @@ describe("toStockVariants", () => {
         },
       ],
     })
-    expect(b).toMatchObject({ id: "variant_2", sku: "OTHER", profileId: null, backorderMarker: null, inventory: [] })
+    expect(b).toMatchObject({ id: "variant_2", sku: "OTHER", profileId: null, inventory: [] })
+    // The legacy marker in metadata isn't read: the reason is in stock_backordered.
+    expect("backorderMarker" in a).toBe(false)
   })
 })
 
-describe("the backorder marker (API 1.3.0)", () => {
-  it("reads both marker values", () => {
-    const of = (value: unknown) =>
-      toStockVariants([{ id: "v", sku: "S", metadata: { print_trail_backorder: value }, inventory_items: [] }], new Map())[0].backorderMarker
-    expect(of(true)).toBe("print-on-demand")
-    expect(of("pre-order")).toBe("pre-order")
-    expect(of("true")).toBeNull()
-    expect(of(undefined)).toBeNull()
-    expect(toStockVariants([{ id: "v", metadata: null }], new Map())[0].backorderMarker).toBeNull()
-  })
-
-  it("writes the pre-order marker", () => {
-    expect(backorderPatches(["v1", "v2"], true, { v1: "pre-order", v2: "print-on-demand" })).toEqual([
-      { id: "v1", metadata: { print_trail_backorder: "pre-order" }, fields: { allow_backorder: true } },
-      { id: "v2", metadata: { print_trail_backorder: true }, fields: { allow_backorder: true } },
+describe("allow_backorder", () => {
+  it("setBackorder sends only allow_backorder, by selector", () => {
+    const ids = Array.from({ length: 150 }, (_, i) => `v${i}`)
+    const updates = backorderUpdates(ids, true)
+    // updateProductVariantsWorkflow's selector form, 100 variants at a time:
+    // no metadata, so nothing else on the variant is written.
+    expect(updates).toEqual([
+      { selector: { id: ids.slice(0, 100) }, update: { allow_backorder: true } },
+      { selector: { id: ids.slice(100) }, update: { allow_backorder: true } },
     ])
-    // No reason given: print-on-demand, as before.
-    expect(backorderPatches(["v3"], true)).toEqual([
-      { id: "v3", metadata: { print_trail_backorder: true }, fields: { allow_backorder: true } },
-    ])
-    // Off deletes either value.
-    expect(backorderPatches(["v1"], false, { v1: "pre-order" })).toEqual([
-      { id: "v1", metadata: { print_trail_backorder: "" }, fields: { allow_backorder: false } },
-    ])
+    expect(backorderUpdates(["v1"], false)).toEqual([{ selector: { id: ["v1"] }, update: { allow_backorder: false } }])
+    expect(backorderUpdates([], true)).toEqual([])
   })
 })
 
@@ -128,10 +117,16 @@ describe("print_trail_pre_order", () => {
 })
 
 describe("stale keys", () => {
-  it("deletes a stale marker alone, through either Medusa's replace or its merge", async () => {
+  // One write per variant deletes every key 0.2.0 kept there, through either
+  // Medusa's replace (up to 2.18) or its merge (2.19+).
+  it("the store's keys and print_trail_sku survive, in replace mode and in merge mode", async () => {
+    const check = { sku: "A", status: "matched", checked_at: "t" }
     const stored: Record<string, Record<string, unknown> | null> = {
-      v1: { print_trail_backorder: true, print_trail_sku: "A" },
-      v2: { print_trail_sku: "B" },
+      v1: { print_trail_sku_check: check, print_trail_backorder: true, print_trail_pre_order: "2020-01-01", print_trail_sku: "A", store_key: 1 },
+      v2: { print_trail_sku_check: check, print_trail_pre_order: "2026-12-01", print_trail_sku: 9780000000026 },
+      // Nothing of 0.2.0's left: not written.
+      v3: { print_trail_pre_order: "2026-12-01", store_key: 3 },
+      v4: null,
     }
     const written: { mode: string; rows: unknown[] }[] = []
     for (const mode of ["replace", "merge"] as const) {
@@ -145,13 +140,37 @@ describe("stale keys", () => {
           rows.push(...r)
         },
       }
-      await patchVariantMetadata(store, staleMarkerPatches(["v1", "v2"]))
+      await patchVariantMetadata(
+        store,
+        legacyKeyPatches([
+          // Outside the run's scope: the pre-order flag goes too.
+          { id: "v1", preOrderField: true },
+          { id: "v2", preOrderField: false },
+          { id: "v3", preOrderField: false },
+          { id: "v4", preOrderField: true },
+        ])
+      )
       written.push({ mode, rows })
     }
-    // No allow_backorder; v2 has no marker and isn't written.
+    // No allow_backorder, and print_trail_sku is kept (as a string).
     expect(written).toEqual([
-      { mode: "replace", rows: [{ id: "v1", metadata: { print_trail_sku: "A" } }] },
-      { mode: "merge", rows: [{ id: "v1", metadata: { print_trail_backorder: "", print_trail_sku: "A" } }] },
+      {
+        mode: "replace",
+        rows: [
+          { id: "v1", metadata: { print_trail_sku: "A", store_key: 1 } },
+          { id: "v2", metadata: { print_trail_pre_order: "2026-12-01", print_trail_sku: "9780000000026" } },
+        ],
+      },
+      {
+        mode: "merge",
+        rows: [
+          {
+            id: "v1",
+            metadata: { print_trail_sku_check: "", print_trail_backorder: "", print_trail_pre_order: "", print_trail_sku: "A", store_key: 1 },
+          },
+          { id: "v2", metadata: { print_trail_sku_check: "", print_trail_pre_order: "2026-12-01", print_trail_sku: "9780000000026" } },
+        ],
+      },
     ])
   })
 
@@ -159,11 +178,18 @@ describe("stale keys", () => {
     // query.graph over variants: honours id $gt, orders by id, takes `take`.
     const variants = () => {
       let all = [
-        { id: "v1", metadata: { print_trail_pre_order: "2026-12-01" } as Record<string, unknown> | null },
-        { id: "v2", metadata: null },
-        { id: "v3", metadata: { print_trail_backorder: "pre-order", other: 1 } },
-        { id: "v4", metadata: { print_trail_backorder: "true", print_trail_pre_order: null } },
-        { id: "v5", metadata: { print_trail_pre_order: true } },
+        { id: "v1", product_id: "prod_1", metadata: { print_trail_pre_order: "2026-12-01" } as Record<string, unknown> | null },
+        { id: "v2", product_id: "prod_1", metadata: null },
+        { id: "v3", product_id: "prod_2", metadata: { print_trail_backorder: "pre-order", other: 1 } },
+        // Values 0.2.0 never wrote: no marker or check, but the keys are deleted.
+        { id: "v4", product_id: "prod_2", metadata: { print_trail_backorder: "true", print_trail_pre_order: null } },
+        {
+          id: "v5",
+          product_id: "prod_3",
+          metadata: { print_trail_pre_order: true, print_trail_sku_check: { sku: "A", status: "not-found", checked_at: "t" } },
+        },
+        { id: "v6", product_id: "prod_3", metadata: { print_trail_sku_check: "matched" } },
+        { id: "v7", product_id: "prod_3", metadata: { print_trail_sku: "B" } },
       ]
       const calls: unknown[] = []
       const query = {
@@ -177,29 +203,42 @@ describe("stale keys", () => {
       return { query, calls, remove: (id: string) => (all = all.filter((v) => v.id !== id)) }
     }
 
-    it("reads a page by id after the cursor, keeping the variants with the stock sync's keys", async () => {
+    it("reads a page by id after the cursor, keeping the variants with the plugin's keys", async () => {
       const { query, calls } = variants()
+      const found = (id: string, productId: string, over: Record<string, unknown>) => ({
+        id,
+        productId,
+        preOrderField: undefined,
+        backorderMarker: null,
+        check: null,
+        legacyKeys: false,
+        ...over,
+      })
       expect(await listPluginMetadata(query as never, null, 2)).toEqual({
-        found: [{ id: "v1", preOrderField: "2026-12-01", backorderMarker: null }],
+        found: [found("v1", "prod_1", { preOrderField: "2026-12-01" })],
         lastId: "v2",
         read: 2,
       })
       expect(await listPluginMetadata(query as never, "v2", 2)).toEqual({
-        found: [{ id: "v3", preOrderField: undefined, backorderMarker: "pre-order" }],
+        found: [found("v3", "prod_2", { backorderMarker: "pre-order", legacyKeys: true }), found("v4", "prod_2", { preOrderField: null, legacyKeys: true })],
         lastId: "v4",
         read: 2,
       })
       expect(await listPluginMetadata(query as never, "v4", 2)).toEqual({
-        found: [{ id: "v5", preOrderField: true, backorderMarker: null }],
-        lastId: "v5",
-        read: 1,
+        found: [
+          found("v5", "prod_3", { preOrderField: true, check: { sku: "A", status: "not-found", checked_at: "t" }, legacyKeys: true }),
+          found("v6", "prod_3", { legacyKeys: true }),
+        ],
+        lastId: "v6",
+        read: 2,
       })
-      expect(await listPluginMetadata(query as never, "v5", 2)).toEqual({ found: [], lastId: null, read: 0 })
+      expect(await listPluginMetadata(query as never, "v6", 2)).toEqual({ found: [], lastId: "v7", read: 1 })
+      expect(await listPluginMetadata(query as never, "v7", 2)).toEqual({ found: [], lastId: null, read: 0 })
       // No filter on the first page, no skip on any.
-      expect(calls[0]).toEqual({ entity: "product_variant", fields: ["id", "metadata"], pagination: { take: 2, order: { id: "ASC" } } })
+      expect(calls[0]).toEqual({ entity: "product_variant", fields: ["id", "product_id", "metadata"], pagination: { take: 2, order: { id: "ASC" } } })
       expect(calls[1]).toEqual({
         entity: "product_variant",
-        fields: ["id", "metadata"],
+        fields: ["id", "product_id", "metadata"],
         filters: { id: { $gt: "v2" } },
         pagination: { take: 2, order: { id: "ASC" } },
       })
@@ -219,7 +258,7 @@ describe("stale keys", () => {
         if (page.read < 2) break
         after = page.lastId
       }
-      expect(read).toEqual(["v1", "v3", "v5"])
+      expect(read).toEqual(["v1", "v3", "v4", "v5", "v6"])
     })
   })
 })

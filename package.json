@@ -22,11 +22,31 @@
   ],
   "exports": {
     "./package.json": "./package.json",
-    "./workflows": "./.medusa/server/src/workflows/index.js",
-    "./.medusa/server/src/modules/*": "./.medusa/server/src/modules/*/index.js",
-    "./modules/*": "./.medusa/server/src/modules/*/index.js",
-    "./providers/*": "./.medusa/server/src/providers/*/index.js",
-    "./*": "./.medusa/server/src/*.js",
+    "./.medusa/server/src/modules/printTrail": "./.medusa/server/src/modules/printTrail/index.js",
+    "./config": {
+      "types": "./.medusa/server/src/config.d.ts",
+      "default": "./.medusa/server/src/config.js"
+    },
+    "./workflows": {
+      "types": "./.medusa/server/src/workflows/index.d.ts",
+      "default": "./.medusa/server/src/workflows/index.js"
+    },
+    "./modules/printTrail": {
+      "types": "./.medusa/server/src/modules/printTrail/index.d.ts",
+      "default": "./.medusa/server/src/modules/printTrail/index.js"
+    },
+    "./providers/print-trail": {
+      "types": "./.medusa/server/src/providers/print-trail/index.d.ts",
+      "default": "./.medusa/server/src/providers/print-trail/index.js"
+    },
+    "./stock": {
+      "types": "./.medusa/server/src/stock.d.ts",
+      "default": "./.medusa/server/src/stock.js"
+    },
+    "./shipping-options": {
+      "types": "./.medusa/server/src/shipping-options.d.ts",
+      "default": "./.medusa/server/src/shipping-options.js"
+    },
     "./admin": {
       "import": "./.medusa/server/src/admin/index.mjs",
       "require": "./.medusa/server/src/admin/index.js",
@@ -49,7 +69,7 @@
     "prepublishOnly": "medusa plugin:build",
     "test:unit": "TEST_TYPE=unit NODE_OPTIONS=--experimental-vm-modules jest --silent --runInBand --forceExit",
     "test:integration:modules": "TEST_TYPE=integration:modules NODE_OPTIONS=--experimental-vm-modules jest --silent=false --runInBand --forceExit",
-    "test:integration:http": "npm run build && TEST_TYPE=integration:http NODE_OPTIONS=--experimental-vm-modules jest --silent=false --runInBand --forceExit",
+    "test:integration:http": "npm run build && TEST_TYPE=integration:http NODE_OPTIONS='--experimental-vm-modules --max-old-space-size=4096' jest --silent=false --runInBand --forceExit",
     "test:staging": "TEST_TYPE=staging NODE_OPTIONS=--experimental-vm-modules jest --silent=false --runInBand --forceExit",
     "checklist:staging": "jiti scripts/staging-checklist/run.ts",
     "mock": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON dev/mock-print-trail.ts"

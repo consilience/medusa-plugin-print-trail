@@ -9,6 +9,7 @@ import {
   Table,
   Text,
   toast,
+  Tooltip,
   usePrompt,
 } from "@medusajs/ui"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
@@ -19,7 +20,18 @@ import { hasHealthNotices, HealthNotices } from "../../../components/health-noti
 import { api, errorOf, keys } from "../../../lib/api"
 import { CONFIG_SNIPPET, ENV_SNIPPET, formatDate } from "../../../lib/format"
 import { confirmationSteps } from "../../../lib/webhook-confirm"
-import { checkBadge, diagnosisKey, secretSourceKey, warningKey, webhookActionKey, webhookStateKey } from "../../../lib/labels"
+import {
+  checkBadge,
+  diagnosisKey,
+  type Label,
+  secretSourceKey,
+  skuHealthFailed,
+  stockSyncToast,
+  stockSyncUnavailableKey,
+  warningKey,
+  webhookActionKey,
+  webhookStateKey,
+} from "../../../lib/labels"
 
 type WebhookResult = ConnectionTestResult["webhook"]
 
@@ -234,15 +246,62 @@ const MethodsSection = ({ view }: { view: ConnectionView }) => {
   )
 }
 
-const SkuHealthSection = ({ health, loading }: { health: SkuHealthView | undefined; loading: boolean }) => {
+// "Sync stock now": a full stock sync, waited for. Turned off with the
+// stock sync, or when SKU health couldn't be loaded, with the reason as its
+// tooltip.
+const SyncStockButton = ({
+  health,
+  loadFailed,
+  onSync,
+  syncing,
+}: {
+  health: SkuHealthView | undefined
+  loadFailed: Label | null
+  onSync: () => void
+  syncing: boolean
+}) => {
+  const { t } = useTranslation("printTrail")
+  const unavailable = health !== undefined && !health.stockSyncEnabled
+  const reason = loadFailed ? t(loadFailed.key, loadFailed.values) : unavailable ? t(stockSyncUnavailableKey) : null
+  const button = (
+    <Button size="small" variant="secondary" onClick={onSync} isLoading={syncing} disabled={syncing || !health || unavailable}>
+      {t("settings.sku.syncNow.button")}
+    </Button>
+  )
+  return reason ? (
+    <Tooltip content={reason}>
+      <span>{button}</span>
+    </Tooltip>
+  ) : (
+    button
+  )
+}
+
+const SkuHealthSection = ({
+  health,
+  loading,
+  loadFailed,
+  onSync,
+  syncing,
+}: {
+  health: SkuHealthView | undefined
+  loading: boolean
+  loadFailed: Label | null
+  onSync: () => void
+  syncing: boolean
+}) => {
   const { t } = useTranslation("printTrail")
   const run = health?.lastRun ?? null
   return (
-    <Section title={t("settings.sku.heading")} id="sku-health">
+    <Section
+      title={t("settings.sku.heading")}
+      id="sku-health"
+      actions={<SyncStockButton health={health} loadFailed={loadFailed} onSync={onSync} syncing={syncing} />}
+    >
       {loading || !health ? (
         <div className="px-6 py-4">
           <Text size="small" className="text-ui-fg-subtle">
-            {t("common.loading")}
+            {loadFailed ? t(loadFailed.key, loadFailed.values) : t("common.loading")}
           </Text>
         </div>
       ) : (
@@ -595,6 +654,18 @@ const SettingsPage = () => {
     }
   }
 
+  // The request waits for the run. A long one behind a proxy can time out
+  // here while it finishes on the server: the last run shows the outcome.
+  const syncStock = useMutation({
+    mutationFn: () => api.syncStockNow(),
+    onSuccess: (result) => {
+      const label = stockSyncToast(result)
+      toast[label.variant](t(label.key, label.values))
+    },
+    onError: (e) => toast.error(t("settings.sku.syncNow.requestFailed", { message: errorOf(e).message })),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: keys.skuHealth }),
+  })
+
   const reregister = async () => {
     try {
       await handleWebhookResult(await register.mutateAsync(false))
@@ -644,7 +715,13 @@ const SettingsPage = () => {
             rotating={rotate.isPending}
           />
           <MethodsSection view={view} />
-          <SkuHealthSection health={skuHealth.data} loading={skuHealth.isLoading} />
+          <SkuHealthSection
+            health={skuHealth.data}
+            loading={skuHealth.isLoading}
+            loadFailed={skuHealth.isError && !skuHealth.data ? skuHealthFailed(errorOf(skuHealth.error).message) : null}
+            onSync={() => syncStock.mutate()}
+            syncing={syncStock.isPending}
+          />
           <OptionsSection view={view} />
         </>
       )}

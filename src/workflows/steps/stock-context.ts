@@ -3,15 +3,10 @@ import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { updateInventoryLevelsWorkflow, updateProductVariantsWorkflow } from "@medusajs/medusa/core-flows"
 import { PRINT_TRAIL_PROVIDER_ID } from "../../lib/lines"
 import { resolveSku } from "../../lib/sku"
-import {
-  BACKORDER_MARKER_KEY,
-  backorderMarkerValue,
-  PRE_ORDER_FIELD_KEY,
-  readBackorderMarker,
-  type BackorderReason,
-  type StockVariant,
-} from "../../lib/stock"
+import { LEGACY_BACKORDER_MARKER_KEY, PRE_ORDER_FIELD_KEY, readBackorderMarker, type StockVariant } from "../../lib/stock"
+import { SKU_CHECK_QUEUE_PREFIX } from "../../lib/sku-check-queue"
 import type { MetadataPage, PluginMetadata, StockCatalogue, StockContext } from "../../lib/stock-flow"
+import { LEGACY_SKU_CHECK_KEY, legacyCheckOf } from "../../lib/variant-checks"
 import { installedMetadataUpdateMode, patchVariantMetadata, type VariantMetadataStore } from "../../lib/variant-metadata"
 import { PRINT_TRAIL_MODULE } from "../../modules/printTrail"
 import type PrintTrailModuleService from "../../modules/printTrail/service"
@@ -33,6 +28,7 @@ export const STOCK_VARIANT_FIELDS = [
 
 const PRODUCT_CHUNK = 200
 const VARIANT_CHUNK = 100
+const LIVE_CHUNK = 500
 
 type GraphStockVariant = {
   id: string
@@ -64,7 +60,6 @@ export function toStockVariants(graphVariants: unknown[], profileByProduct: Map<
             profileId: (v.product_id && profileByProduct.get(v.product_id)) || null,
             manageInventory: v.manage_inventory === true,
             allowBackorder: v.allow_backorder === true,
-            backorderMarker: readBackorderMarker(v.metadata?.[BACKORDER_MARKER_KEY]),
             preOrderField: v.metadata?.[PRE_ORDER_FIELD_KEY],
             inventory: (v.inventory_items ?? []).flatMap((i) =>
               i
@@ -143,14 +138,15 @@ export function buildVariantMetadataStore(container: MedusaContainer): VariantMe
   }
 }
 
-// The marker is true for print-on-demand and "pre-order" for a pre-order
-// product; "" deletes it (src/lib/variant-metadata.ts).
-export function backorderPatches(variantIds: string[], on: boolean, reasonById?: Record<string, BackorderReason>) {
-  return variantIds.map((id) => ({
-    id,
-    metadata: { [BACKORDER_MARKER_KEY]: on ? backorderMarkerValue(reasonById?.[id] ?? "print-on-demand") : "" },
-    fields: { allow_backorder: on },
-  }))
+// updateProductVariantsWorkflow's selector form: allow_backorder alone, so
+// the variant's metadata (and anything else on it) isn't read or written. A
+// deleted variant matches nothing.
+export function backorderUpdates(variantIds: string[], on: boolean) {
+  const updates: { selector: { id: string[] }; update: { allow_backorder: boolean } }[] = []
+  for (let i = 0; i < variantIds.length; i += VARIANT_CHUNK) {
+    updates.push({ selector: { id: variantIds.slice(i, i + VARIANT_CHUNK) }, update: { allow_backorder: on } })
+  }
+  return updates
 }
 
 // print_trail_pre_order: the date, true, or "" to delete it. Skipped when the
@@ -166,19 +162,25 @@ export function preOrderFieldPatches(updates: { id: string; value: string | true
   }))
 }
 
-// The stale marker alone: "" deletes it, and allow_backorder isn't written.
-// Skipped when the variant no longer has the key.
-export function staleMarkerPatches(variantIds: string[]) {
-  return variantIds.map((id) => ({
-    id,
-    metadata: { [BACKORDER_MARKER_KEY]: "" },
-    when: (current: Record<string, unknown> | null) => current?.[BACKORDER_MARKER_KEY] !== undefined,
-  }))
+// The metadata scan's one write per variant: "" deletes the keys 0.2.0
+// kept in metadata, and print_trail_pre_order too where `preOrderField` is
+// set; allow_backorder isn't written. Skipped when the variant's current
+// metadata (re-read just before) has none of them.
+export function legacyKeyPatches(variants: { id: string; preOrderField: boolean }[]) {
+  return variants.map(({ id, preOrderField }) => {
+    const keys = [LEGACY_SKU_CHECK_KEY, LEGACY_BACKORDER_MARKER_KEY, ...(preOrderField ? [PRE_ORDER_FIELD_KEY] : [])]
+    return {
+      id,
+      metadata: Object.fromEntries(keys.map((k) => [k, ""])),
+      when: (current: Record<string, unknown> | null) => keys.some((k) => current?.[k] !== undefined),
+    }
+  })
 }
 
 // One page of the metadata scan: up to `take` variants (soft-deleted ones
-// excluded) with ids after `after`, by id ascending; only those carrying one
-// of the stock sync's keys are kept. Keyset rather than offset, so a variant
+// excluded) with ids after `after`, by id ascending; only those carrying
+// print_trail_pre_order, print_trail_backorder or print_trail_sku_check are
+// kept. Keyset rather than offset, so a variant
 // deleted from a page already read can't shift an unread one behind the
 // next page's start. Postgres both compares and orders the ids, so the two
 // agree. No skip, so Query calls the module's list, with no count.
@@ -189,30 +191,64 @@ export async function listPluginMetadata(
 ): Promise<MetadataPage> {
   const { data } = await query.graph({
     entity: "product_variant",
-    fields: ["id", "metadata"],
+    fields: ["id", "product_id", "metadata"],
     ...(after === null ? {} : { filters: { id: { $gt: after } } }),
     pagination: { take, order: { id: "ASC" } },
   })
-  const rows = data as { id: string; metadata?: Record<string, unknown> | null }[]
+  const rows = data as { id: string; product_id: string; metadata?: Record<string, unknown> | null }[]
   const found: PluginMetadata[] = []
   for (const v of rows) {
-    const preOrderField = v.metadata?.[PRE_ORDER_FIELD_KEY]
-    const backorderMarker = readBackorderMarker(v.metadata?.[BACKORDER_MARKER_KEY])
-    if ((preOrderField !== undefined && preOrderField !== null) || backorderMarker !== null) {
-      found.push({ id: v.id, preOrderField, backorderMarker })
+    const metadata = v.metadata ?? null
+    const preOrderField = metadata?.[PRE_ORDER_FIELD_KEY]
+    const legacyKeys = metadata?.[LEGACY_BACKORDER_MARKER_KEY] !== undefined || metadata?.[LEGACY_SKU_CHECK_KEY] !== undefined
+    if ((preOrderField !== undefined && preOrderField !== null) || legacyKeys) {
+      found.push({
+        id: v.id,
+        productId: v.product_id,
+        preOrderField,
+        backorderMarker: readBackorderMarker(metadata?.[LEGACY_BACKORDER_MARKER_KEY]),
+        check: legacyCheckOf(metadata),
+        legacyKeys,
+      })
     }
   }
   return { found, lastId: rows.length ? rows[rows.length - 1].id : null, read: rows.length }
 }
 
+// The variants of these ids Medusa still has (Query leaves out soft-deleted
+// ones by default).
+export async function loadLiveVariants(
+  query: Omit<RemoteQueryFunction, symbol>,
+  ids: string[]
+): Promise<{ id: string; productId: string }[]> {
+  const out: { id: string; productId: string }[] = []
+  for (let i = 0; i < ids.length; i += LIVE_CHUNK) {
+    const { data } = await query.graph({ entity: "product_variant", fields: ["id", "product_id"], filters: { id: ids.slice(i, i + LIVE_CHUNK) } })
+    for (const v of data as { id: string; product_id?: string | null }[]) if (v.product_id) out.push({ id: v.id, productId: v.product_id })
+  }
+  return out
+}
+
 export function buildStockCatalogue(container: MedusaContainer): StockCatalogue {
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const metadata = buildVariantMetadataStore(container)
+  // The run's product → profile link, read once by loadVariants and reused
+  // by ptProductIds (one catalogue per run).
+  let profileLink: { key: string; map: Map<string, string> } | null = null
+  const profileByProduct = async (ptProfileIds: string[]) => {
+    const key = [...ptProfileIds].sort().join("\n")
+    if (profileLink?.key !== key) profileLink = { key, map: await loadProfileByProduct(query, { profileIds: ptProfileIds }) }
+    return profileLink.map
+  }
   return {
     ptProfileIds: () => loadPtProfileIds(query),
+    async ptProductIds(ptProfileIds) {
+      return new Set((await profileByProduct(ptProfileIds)).keys())
+    },
+    liveVariants: (ids) => loadLiveVariants(query, ids),
     async loadVariants(ptProfileIds) {
-      const profileByProduct = await loadProfileByProduct(query, { profileIds: ptProfileIds })
-      const productIds = [...profileByProduct.keys()]
+      const byProduct = await profileByProduct(ptProfileIds)
+      const productIds = [...byProduct.keys()]
       const variants: StockVariant[] = []
       for (let i = 0; i < productIds.length; i += PRODUCT_CHUNK) {
         const { data } = await query.graph({
@@ -220,19 +256,18 @@ export function buildStockCatalogue(container: MedusaContainer): StockCatalogue 
           fields: STOCK_VARIANT_FIELDS,
           filters: { product_id: productIds.slice(i, i + PRODUCT_CHUNK), manage_inventory: true },
         })
-        variants.push(...toStockVariants(data, profileByProduct))
+        variants.push(...toStockVariants(data, byProduct))
       }
       return variants
     },
     async updateLevels(updates) {
       await updateInventoryLevelsWorkflow(container).run({ input: { updates } })
     },
-    // One update per variant, so allow_backorder and the marker never
-    // disagree. Turning it off deletes the marker and keeps the other keys.
-    // The flow only switches off variants in its stock_backordered record.
-    async setBackorder(variantIds, on, reasonById) {
-      for (let i = 0; i < variantIds.length; i += VARIANT_CHUNK) {
-        await patchVariantMetadata(metadata, backorderPatches(variantIds.slice(i, i + VARIANT_CHUNK), on, reasonById))
+    // The flow only switches off variants in its stock_backordered record,
+    // which also keeps why each one is on.
+    async setBackorder(variantIds, on) {
+      for (const input of backorderUpdates(variantIds, on)) {
+        await updateProductVariantsWorkflow(container).run({ input })
       }
     },
     async setPreOrderFields(updates) {
@@ -240,9 +275,9 @@ export function buildStockCatalogue(container: MedusaContainer): StockCatalogue 
         await patchVariantMetadata(metadata, preOrderFieldPatches(updates.slice(i, i + VARIANT_CHUNK)))
       }
     },
-    async clearBackorderMarkers(variantIds) {
-      for (let i = 0; i < variantIds.length; i += VARIANT_CHUNK) {
-        await patchVariantMetadata(metadata, staleMarkerPatches(variantIds.slice(i, i + VARIANT_CHUNK)))
+    async deleteLegacyKeys(variants) {
+      for (let i = 0; i < variants.length; i += VARIANT_CHUNK) {
+        await patchVariantMetadata(metadata, legacyKeyPatches(variants.slice(i, i + VARIANT_CHUNK)))
       }
     },
     listPluginMetadata: (after, take) => listPluginMetadata(query, after, take),
@@ -258,5 +293,12 @@ export async function buildStockContext(container: MedusaContainer): Promise<Sto
     options: await service.getOptions(),
     seen: service,
     logger: container.resolve(ContainerRegistrationKeys.LOGGER),
+    variants: {
+      rowPage: (after, take) => service.variantRowPage(after, take),
+      forget: (filter) => service.forgetVariants(filter),
+      setCheckStatuses: (updates) => service.setCheckStatuses(updates),
+      queueChecks: (ids) => service.queueStateKeys(SKU_CHECK_QUEUE_PREFIX, ids),
+      adopt: (checks) => service.adoptVariantChecks(checks),
+    },
   }
 }

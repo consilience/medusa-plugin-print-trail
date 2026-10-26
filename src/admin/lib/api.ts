@@ -11,6 +11,7 @@ import type {
   ShippingOptionChoices,
   ShippingOptionView,
   SkuHealthView,
+  StockSyncNowView,
   VariantView,
 } from "../../lib/admin-types"
 import { sdk } from "./sdk"
@@ -54,6 +55,7 @@ export const api = {
   attention: (limit: number, offset: number) =>
     sdk.client.fetch<AttentionList>(`${base}/attention`, { query: { limit, offset } }),
   skuHealth: () => sdk.client.fetch<SkuHealthView>(`${base}/sku-health`),
+  syncStockNow: () => sdk.client.fetch<StockSyncNowView>(`${base}/stock-sync`, { method: "POST", body: {} }),
   variant: (id: string) => sdk.client.fetch<VariantView>(`${base}/variants/${id}`),
 }
 

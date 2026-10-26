@@ -2,7 +2,7 @@
 // admin user) and the store API (as a shopper). Errors carry the status and a
 // short body, never the request's headers.
 import { resolveSku, skusMatch } from "../../../src/lib/sku"
-import { SKU_CHECK_KEY } from "../../../src/lib/sku-check"
+import { LEGACY_SKU_CHECK_KEY } from "../../../src/lib/variant-checks"
 import type { Config } from "./config"
 import { ChecklistError } from "./runner"
 
@@ -44,9 +44,10 @@ const ORDER_FIELDS = [
 // An order item's current quantity (an order edit changes detail.quantity).
 export const itemQuantity = (item: any): number => Number(item.detail?.quantity ?? item.quantity)
 
-// The plugin stores a variant's SKU check in its metadata.
+// Before 1.0.0 the plugin stored a variant's SKU check in its metadata; a
+// store upgraded from 0.2.0 may still carry it until the metadata scan runs.
 export const withoutSkuCheck = (metadata: Record<string, unknown>) => {
-  const { [SKU_CHECK_KEY]: _check, ...rest } = metadata
+  const { [LEGACY_SKU_CHECK_KEY]: _check, ...rest } = metadata
   return rest
 }
 

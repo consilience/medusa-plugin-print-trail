@@ -4,7 +4,10 @@ import {
   dispatchedSkus,
   mergeUnmatched,
   planStockSync,
+  readUnmatchedSkus,
   shortfallSkus,
+  STATE_KEYS,
+  statusBySku,
   stockFigure,
   type StockVariant,
 } from "../stock"
@@ -18,7 +21,6 @@ const variant = (over: Partial<StockVariant> & { id: string }): StockVariant => 
   profileId: PT,
   manageInventory: true,
   allowBackorder: false,
-  backorderMarker: null,
   inventory: [
     { inventoryItemId: `iitem_${over.id}`, requiredQuantity: 1, levels: [{ locationId: "sloc_a", stockedQuantity: 0 }] },
   ],
@@ -125,7 +127,7 @@ describe("planStockSync", () => {
       backorderOn: [],
       backorderReason: {},
       backorderOff: [],
-      staleMarkers: [],
+      reasons: {},
       matched: [],
       unmatched: [],
       unknown: [],
@@ -142,7 +144,7 @@ describe("planStockSync", () => {
     expect(on.backorderOn).toEqual(["v1"])
     expect(on.levelUpdates).toEqual([{ inventory_item_id: "iitem_v1", location_id: "sloc_a", stocked_quantity: 3 }])
 
-    const marked = variant({ id: "v1", allowBackorder: true, backorderMarker: "print-on-demand" })
+    const marked = variant({ id: "v1", allowBackorder: true })
     const tracked = new Set(["v1"])
     const still = planStockSync({ levels: [{ sku: "SKU-1", stock: 10003 }], variants: [marked], ptProfileIds: profiles, tracked })
     expect(still.backorderOn).toEqual([])
@@ -153,7 +155,7 @@ describe("planStockSync", () => {
   })
 
   it("never switches off a backorder the plugin didn't set", () => {
-    const merchant = variant({ id: "v1", allowBackorder: true, backorderMarker: null })
+    const merchant = variant({ id: "v1", allowBackorder: true })
     for (const stock of [10005, 9999, 3]) {
       const plan = planStockSync({ levels: [{ sku: "SKU-1", stock }], variants: [merchant], ptProfileIds: profiles })
       expect(plan.backorderOff).toEqual([])
@@ -161,19 +163,19 @@ describe("planStockSync", () => {
     }
     const gone = planStockSync({ levels: [], variants: [merchant], ptProfileIds: profiles })
     expect(gone.backorderOff).toEqual([])
-    // A marker alone (say, copied by the merchant) isn't the plugin's record.
-    const markedOnly = variant({ id: "v2", allowBackorder: true, backorderMarker: "print-on-demand" })
+    // Only the plugin's record says a backorder is the plugin's.
+    const markedOnly = variant({ id: "v2", allowBackorder: true })
     expect(planStockSync({ levels: [{ sku: "SKU-1", stock: 3 }], variants: [markedOnly], ptProfileIds: profiles }).backorderOff).toEqual([])
   })
 
   it("switches off a tracked backorder whose marker was lost", () => {
-    const lost = variant({ id: "v1", allowBackorder: true, backorderMarker: null })
+    const lost = variant({ id: "v1", allowBackorder: true })
     const plan = planStockSync({ levels: [{ sku: "SKU-1", stock: 3 }], variants: [lost], ptProfileIds: profiles, tracked: new Set(["v1"]) })
     expect(plan.backorderOff).toEqual(["v1"])
   })
 
   it("switches off a plugin backorder when the SKU leaves Print Trail", () => {
-    const marked = variant({ id: "v1", allowBackorder: true, backorderMarker: "print-on-demand" })
+    const marked = variant({ id: "v1", allowBackorder: true })
     const plan = planStockSync({
       levels: [{ sku: "OTHER", stock: 10003 }],
       variants: [marked],
@@ -186,11 +188,10 @@ describe("planStockSync", () => {
   })
 
   it("switches off a plugin backorder on a variant that loses its SKU or becomes a kit", () => {
-    const noSku = variant({ id: "v1", sku: null, allowBackorder: true, backorderMarker: "print-on-demand" })
+    const noSku = variant({ id: "v1", sku: null, allowBackorder: true })
     const kit = variant({
       id: "v2",
       allowBackorder: true,
-      backorderMarker: "print-on-demand",
       inventory: [...twoLevels("v2a"), ...twoLevels("v2b")],
     })
     const merchant = variant({ id: "v3", sku: null, allowBackorder: true })
@@ -205,7 +206,7 @@ describe("planStockSync", () => {
   })
 
   it("leaves a variant alone when Print Trail's figure is unknown", () => {
-    const v = variant({ id: "v1", inventory: twoLevels("v1", 5, 5), allowBackorder: true, backorderMarker: "print-on-demand" })
+    const v = variant({ id: "v1", inventory: twoLevels("v1", 5, 5), allowBackorder: true })
     const tracked = new Set(["v1"])
     for (const stock of [null, "abc", undefined, ""] as unknown as number[]) {
       const plan = planStockSync({ levels: [{ sku: "SKU-1", stock }], variants: [v], ptProfileIds: profiles, tracked })
@@ -307,6 +308,23 @@ describe("planStockSync", () => {
   })
 })
 
+describe("statusBySku", () => {
+  it("picks the figure's row, else the SKU's first", () => {
+    const statuses = statusBySku([
+      { sku: " sku-a ", stock: null as unknown as number, status: "inactive" },
+      { sku: "SKU-A", stock: 4, status: "active" },
+      { sku: "SKU-B", stock: "" as unknown as number, status: "pre-order" },
+      { sku: "sku-b", stock: null as unknown as number, status: "active" },
+      { sku: null, stock: 5, status: "active" },
+    ])
+    expect([...statuses.keys()]).toEqual(["sku-a", "sku-b"])
+    // The figure's row counts, as planStockSync reads it.
+    expect(statuses.get("sku-a")?.status).toBe("active")
+    // No usable figure: the SKU's first row.
+    expect(statuses.get("sku-b")?.status).toBe("pre-order")
+  })
+})
+
 describe("watermark", () => {
   it("drops a delivery not newer than the watermark", () => {
     const w = { changedAt: "2026-10-19T10:00:00Z" }
@@ -361,6 +379,22 @@ describe("mergeUnmatched and shortfallSkus", () => {
     ).toEqual(["A", "B"])
     expect(shortfallSkus(null)).toEqual([])
     expect(shortfallSkus({ sku: "A" })).toEqual([])
+  })
+})
+
+describe("readUnmatchedSkus", () => {
+  it("unions the stock sync's list, the not-found checks and the legacy list, case-insensitively", async () => {
+    const values: Record<string, unknown> = {
+      [STATE_KEYS.unmatched]: { skus: ["both", "STOCK-1"] },
+      [STATE_KEYS.skuCheckUnmatched]: { skus: ["LEGACY-1", "stock-1"] },
+    }
+    const store = {
+      getState: async <T,>(key: string) => (values[key] as T | undefined) ?? null,
+      notFoundSkus: async () => ["not-1", "BOTH"],
+    }
+    expect(await readUnmatchedSkus(store)).toEqual(["both", "LEGACY-1", "not-1", "STOCK-1"])
+    delete values[STATE_KEYS.skuCheckUnmatched]
+    expect(await readUnmatchedSkus(store)).toEqual(["both", "not-1", "STOCK-1"])
   })
 })
 
@@ -427,7 +461,7 @@ describe("planStockSync with pre-order rows", () => {
     expect(plan.backorderOff).toEqual([])
     expect(plan.preOrders).toEqual([{ sku: "SKU-1", publicationDate: "2026-12-01", limit: 50, remaining: 40 }])
     // A tracked variant whose SKU becomes limited comes off.
-    const tracked = variant({ id: "v1", allowBackorder: true, backorderMarker: "pre-order" })
+    const tracked = variant({ id: "v1", allowBackorder: true })
     const off = planStockSync({ levels: [pre({ stock: 40, preOrderLimit: 50, preOrderRemaining: 40 })], variants: [tracked], ptProfileIds: profiles, tracked: new Set(["v1"]) })
     expect(off.backorderOff).toEqual(["v1"])
   })
@@ -464,7 +498,7 @@ describe("planStockSync with pre-order rows", () => {
   })
 
   it("going active turns off only a plugin backorder", () => {
-    const mine = variant({ id: "v1", allowBackorder: true, backorderMarker: "pre-order" })
+    const mine = variant({ id: "v1", allowBackorder: true })
     const theirs = variant({ id: "v2", allowBackorder: true })
     const plan = planStockSync({ levels: [active(0)], variants: [mine, theirs], ptProfileIds: profiles, tracked: new Set(["v1"]) })
     expect(plan.backorderOff).toEqual(["v1"])
@@ -476,15 +510,17 @@ describe("planStockSync with pre-order rows", () => {
     expect(plan.backorderOn).toEqual([])
     expect(plan.backorderOff).toEqual([])
     expect(plan.backorderReason).toEqual({})
+    // Never claimed.
+    expect(plan.reasons).toEqual({})
   })
 
   it("print-on-demand and pre-order: stays on until neither", () => {
     const tracked = new Set(["v1"])
-    const v = variant({ id: "v1", allowBackorder: true, backorderMarker: "pre-order" })
-    // Pre-order with print-on-demand: on (re-marked as print-on-demand).
+    const v = variant({ id: "v1", allowBackorder: true })
+    // Pre-order with print-on-demand: on, its reason print-on-demand.
     expect(planStockSync({ levels: [pre({ stock: 10000 })], variants: [v], ptProfileIds: profiles, tracked }).backorderOff).toEqual([])
     // Active, still print-on-demand: on.
-    const pod = variant({ id: "v1", allowBackorder: true, backorderMarker: "print-on-demand" })
+    const pod = variant({ id: "v1", allowBackorder: true })
     const still = planStockSync({ levels: [active(10000)], variants: [pod], ptProfileIds: profiles, tracked })
     expect(still.backorderOn).toEqual([])
     expect(still.backorderOff).toEqual([])
@@ -492,14 +528,54 @@ describe("planStockSync with pre-order rows", () => {
     expect(planStockSync({ levels: [active(2)], variants: [pod], ptProfileIds: profiles, tracked }).backorderOff).toEqual(["v1"])
   })
 
-  it("re-marks a tracked variant whose reason changed", () => {
+  it("a tracked pre-order that becomes print-on-demand changes its reason without a write", () => {
     const tracked = new Set(["v1"])
-    const v = variant({ id: "v1", allowBackorder: true, backorderMarker: "pre-order" })
+    const v = variant({ id: "v1", allowBackorder: true })
     const plan = planStockSync({ levels: [active(10004)], variants: [v], ptProfileIds: profiles, tracked })
-    expect(plan.backorderOn).toEqual(["v1"])
-    expect(plan.backorderReason).toEqual({ v1: "print-on-demand" })
+    expect(plan.backorderOn).toEqual([])
+    expect(plan.backorderOff).toEqual([])
+    expect(plan.reasons).toEqual({ v1: "print-on-demand" })
     // An untracked one is never claimed.
-    expect(planStockSync({ levels: [active(10004)], variants: [v], ptProfileIds: profiles }).backorderOn).toEqual([])
+    const untracked = planStockSync({ levels: [active(10004)], variants: [v], ptProfileIds: profiles })
+    expect(untracked.backorderOn).toEqual([])
+    expect(untracked.reasons).toEqual({})
+  })
+
+  it("reasons cover every plugin backorder after the run", () => {
+    const one = (id: string, sku: string, over: Partial<StockVariant> = {}) =>
+      variant({ id, sku, inventory: [{ inventoryItemId: `iitem_${id}`, requiredQuantity: 1, levels: [{ locationId: "sloc_a", stockedQuantity: 0 }] }], ...over })
+    const plan = planStockSync({
+      levels: [active(10004, { sku: "POD-1" }), pre({ sku: "PRE-1" }), active(3, { sku: "LIVE-1" }), pre({ sku: "OWN-1" })],
+      variants: [
+        // Turned on now.
+        one("v1", "POD-1"),
+        // Tracked and still wanted.
+        one("v2", "PRE-1", { allowBackorder: true }),
+        // Tracked and turned off.
+        one("v3", "LIVE-1", { allowBackorder: true }),
+        // The store's own.
+        one("v4", "OWN-1", { allowBackorder: true }),
+      ],
+      ptProfileIds: profiles,
+      tracked: new Set(["v2", "v3"]),
+    })
+    expect(plan.backorderOn).toEqual(["v1"])
+    expect(plan.backorderOff).toEqual(["v3"])
+    expect(plan.reasons).toEqual({ v1: "print-on-demand", v2: "pre-order" })
+    expect("staleMarkers" in plan).toBe(false)
+  })
+
+  it("a conflicted item's variants get no reason", () => {
+    const item = [{ inventoryItemId: "iitem_shared", requiredQuantity: 1, levels: [{ locationId: "sloc_a", stockedQuantity: 0 }] }]
+    const plan = planStockSync({
+      levels: [active(10004, { sku: "POD-1" }), active(10002, { sku: "POD-2" })],
+      variants: [variant({ id: "v1", sku: "POD-1", inventory: item }), variant({ id: "v2", sku: "POD-2", inventory: item, allowBackorder: true })],
+      ptProfileIds: profiles,
+      tracked: new Set(["v2"]),
+    })
+    expect(plan.skipped.map((s) => s.reason)).toEqual(["shared-item-conflict", "shared-item-conflict"])
+    expect(plan.backorderOn).toEqual([])
+    expect(plan.reasons).toEqual({})
   })
 
   it("rows without status change nothing", () => {

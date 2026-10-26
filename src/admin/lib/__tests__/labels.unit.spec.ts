@@ -11,6 +11,9 @@ import {
   statusColor,
   onlyWaitingForRelease,
   secretSourceKey,
+  skuHealthFailed,
+  stockSyncToast,
+  stockSyncUnavailableKey,
   warningKey,
   webhookActionKey,
   webhookStateKey,
@@ -115,6 +118,43 @@ describe("labels", () => {
     expect(checkBadge({ status: "matched" }, true)).toEqual({ key: "variant.check.matched", color: "green" })
     expect(checkBadge({ status: "not-found" }, true).color).toBe("red")
     expect(checkBadge(null, false)).toEqual({ key: "variant.check.checking", color: "blue" })
+  })
+})
+
+// "Sync stock now" on the settings page.
+describe("stockSyncToast", () => {
+  const STATUSES = ["completed", "deferred", "disabled", "dropped", "failed"] as const
+
+  it("maps every status to a toast with an English string", () => {
+    const toasts = STATUSES.map((status) => stockSyncToast({ status, summary: status === "failed" ? "failed: Print Trail said no" : "3 levels updated" }))
+    expect(toasts.map((t) => t.variant)).toEqual(["success", "info", "info", "info", "error"])
+    expect(toasts.map((t) => t.key).filter((k) => !has(k))).toEqual([])
+    expect(new Set(toasts.map((t) => t.key)).size).toBe(STATUSES.length)
+    expect(has(stockSyncUnavailableKey)).toBe(true)
+    expect(has("settings.sku.syncNow.button")).toBe(true)
+    expect(has("settings.sku.syncNow.requestFailed")).toBe(true)
+  })
+
+  it("carries the summary, and a failure's reason without its prefix", () => {
+    expect(stockSyncToast({ status: "completed", summary: "3 levels updated" }).values).toEqual({ summary: "3 levels updated" })
+    expect(stockSyncToast({ status: "failed", summary: "failed: Print Trail said no" }).values).toEqual({ reason: "Print Trail said no" })
+    expect(en.settings.sku.syncNow.deferred).toBe("A stock sync is already running. This one runs after it, within one sweep.")
+  })
+})
+
+// SKU health that fails to load shows why instead of loading for ever.
+describe("skuHealthFailed", () => {
+  it("names the error and suggests the migration, with an English string", () => {
+    const failed = skuHealthFailed("An unknown error occurred.")
+    expect(failed).toEqual({ key: "settings.sku.loadFailed", values: { message: "An unknown error occurred" } })
+    expect(skuHealthFailed("")).toEqual({ key: "settings.sku.loadFailedNoDetail" })
+    expect(skuHealthFailed("  ")).toEqual({ key: "settings.sku.loadFailedNoDetail" })
+    for (const key of ["settings.sku.loadFailed", "settings.sku.loadFailedNoDetail"]) {
+      expect(has(key)).toBe(true)
+    }
+    expect(en.settings.sku.loadFailed).toContain("{{message}}")
+    expect(en.settings.sku.loadFailed).toContain("npx medusa db:migrate")
+    expect(en.settings.sku.loadFailedNoDetail).toContain("npx medusa db:migrate")
   })
 })
 
