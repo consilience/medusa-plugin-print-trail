@@ -1,6 +1,6 @@
 # Print Trail for Medusa
 
-`medusa-plugin-print-trail` is a Medusa v2 plugin that connects a Medusa store to the [Print Trail API](https://docs.printtrail.com/developers/api-documentation/).
+`medusa-plugin-print-trail` is a Medusa v2 plugin that connects a Medusa store to the [Print Trail API](https://docs.printtrail.com/developers/api-documentation/) for automated order fulfilment of books and printed products.
 
 - Orders containing Print Trail products are sent to Print Trail and confirmed automatically.
 - Fulfilment progress and tracking numbers come back as Medusa fulfilments and shipments, one per Print Trail parcel, each with its own shipment email.
