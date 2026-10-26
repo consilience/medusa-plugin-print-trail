@@ -152,7 +152,7 @@ const seconds = (env: NodeJS.ProcessEnv, key: string, fallback: number) => {
 }
 
 // A switch: 1 or true is on; unset, empty, 0 or false is off.
-const flag = (env: NodeJS.ProcessEnv, key: string) => {
+const switchOn = (env: NodeJS.ProcessEnv, key: string) => {
   const raw = env[key]?.trim().toLowerCase()
   if (!raw || raw === "0" || raw === "false") return false
   if (raw === "1" || raw === "true") return true
@@ -211,7 +211,7 @@ export function loadConfig(args: Args, env: NodeJS.ProcessEnv, now = new Date())
     countryCode: (optional("CHECKLIST_COUNTRY") ?? "gb").toLowerCase(),
     customerEmail: customerEmail.replace("{run}", runId),
     adminInboxNote: optional("CHECKLIST_ADMIN_INBOX"),
-    stagingDispatch: flag(env, "CHECKLIST_STAGING_DISPATCH"),
+    stagingDispatch: switchOn(env, "CHECKLIST_STAGING_DISPATCH"),
     timeouts: {
       send: seconds(env, "CHECKLIST_SEND_TIMEOUT", 90),
       webhook: seconds(env, "CHECKLIST_WEBHOOK_TIMEOUT", mode === "mock" ? 30 : 180),

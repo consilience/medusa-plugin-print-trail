@@ -306,7 +306,7 @@ export const crash: Scenario = {
       return
     }
     await needsPerson(t, "restart the store")
-    const minutes = Math.round(ctx.config.timeouts.crash / 60000)
+    const minutes = Math.ceil(ctx.config.timeouts.crash / 60000)
     await t.check("restart the store mid-send", async () => {
       const ready = await ask(
         `\n  >>> Crash safety: the script places an order, then asks you to restart the Medusa server and worker at once\n      (for example \`pm2 restart <server> <worker>\`). Confirming the order can then take up to ${minutes} min:\n      a send cut off by the restart is retried after its lease, on the next sweep. Ready? [y/s] `
