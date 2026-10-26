@@ -28,6 +28,7 @@ Print Trail shipping: options priced by weight band, here with Ireland's own ban
 - Medusa `^2.17.2`, tested on 2.17.2 and 2.22.1.
 - Node 22.
 - A Print Trail account with a channel for the store, and the channel's API token.
+- Redis locking (Medusa's Locking Module with its Redis provider) when the store runs more than one process (a server and a worker count as two). Without a shared lock, two processes can send the same order twice.
 
 ## Setup
 
@@ -87,7 +88,7 @@ They create the plugin's tables and its link to orders.
 
 ### 4. Set the environment variables
 
-- `PRINT_TRAIL_BASE_URL`: the Print Trail API host. It has no default, so set it with the other two: a channel ID or token without it stops the plugin's module loading.
+- `PRINT_TRAIL_BASE_URL`: the Print Trail API host shown in the Print Trail app. It has no default, so set it with the other two: a channel ID or token without it stops the plugin's module loading.
 - `PRINT_TRAIL_CHANNEL_ID`: the store's Print Trail channel.
 - `PRINT_TRAIL_API_TOKEN`: the channel's API token.
 - `MEDUSA_BACKEND_URL`: this backend's public `https://` URL. Print Trail sends its webhooks to `{MEDUSA_BACKEND_URL}/hooks/print-trail`.
