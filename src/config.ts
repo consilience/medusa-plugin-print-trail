@@ -96,8 +96,8 @@ export function resolvePluginOptions(
   if ((channelId || apiToken) && !baseUrl) {
     throw new MedusaError(
       MedusaError.Types.INVALID_DATA,
-      `Print Trail API: PRINT_TRAIL_BASE_URL is not set. Use ${STAGING_HOST} for ` +
-        "staging, or the production host shown in the Print Trail app."
+      "Print Trail API: PRINT_TRAIL_BASE_URL is not set. Use https://api.printtrail.com, " +
+        `or ${STAGING_HOST} for staging.`
     )
   }
 
