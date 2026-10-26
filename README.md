@@ -341,6 +341,8 @@ Apply this to any store before taking live orders.
   ```
 
   The Postgres locking provider is unsupported: it never reclaims an expired lock with no owner, and its insert race lets two holders through. The plugin checks the locking provider at startup. It logs an error for the Postgres provider, and the settings page warns when locking is in-memory or Postgres.
+
+  With Redis locking, a lock held by a process that stops mid-run (a restart or a crash) stays until it expires, and that work waits until then: the SKU check for up to 5 minutes, an order's sends and updates for up to 10, and the stock sync for up to 15. Nothing is lost: queued SKU checks, the order and any stock sync requested meanwhile run once the lock has expired.
 - **Use a Redis event bus** (`@medusajs/medusa/event-bus-redis`). The in-memory bus can drop events across restarts. The sweep finds orders whose `order.placed` never arrived, but only within `reconcile.lookbackDays`.
 - **Switch payments and Print Trail credentials together.** Live payments with staging credentials send real orders nowhere. Test payments with production credentials send test orders to be made.
 - **Clear or cancel test orders first.** The sweep sends any uncancelled order with Print Trail lines and no Print Trail order from the last `reconcile.lookbackDays` days. Test orders left open when production credentials go in will be sent.
