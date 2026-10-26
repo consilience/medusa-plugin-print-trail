@@ -244,7 +244,7 @@
     "countries": "Per-country bands",
     "countriesCount_one": "{{count}} country has its own bands",
     "countriesCount_other": "{{count}} countries have their own bands",
-    "countriesHint": "A destination listed here is priced from its own bands; any other destination from the weight bands above. Saving keeps them as they are. You can remove a country here, which also clears one the card can't accept. To change a country's bands, or the currency of a card with countries, send the whole card through the Admin API (see Prices by country in the plugin's reference at docs.printtrail.com/developers/medusa-plugin).",
+    "countriesHint": "A destination listed here is priced from its own bands; any other destination from the weight bands above. Saving keeps them as they are. You can remove a country here, which also clears one the card can't accept. To change a country's bands, or the currency of a card with countries, send the whole card through the Admin API (see Prices by country in the plugin's reference at docs.printtrail.com/integrations/medusa-reference).",
     "removeCountry": "Remove",
     "noCard": "No rate card",
     "invalidCard": "Invalid rate card",

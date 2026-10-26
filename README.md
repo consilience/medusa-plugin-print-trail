@@ -7,7 +7,7 @@
 - Stock levels, pre-orders included, are synced from Print Trail into Medusa inventory.
 - Cancels, order edits, claims and exchanges made in Medusa are carried to Print Trail.
 
-Website: [printtrail.com](https://printtrail.com/). Guide: [docs.printtrail.com/channels/medusa](https://docs.printtrail.com/channels/medusa/).
+Website: [printtrail.com](https://printtrail.com/). Guide: [docs.printtrail.com/integrations/medusa](https://docs.printtrail.com/integrations/medusa/).
 
 ## Screenshots
 
@@ -109,8 +109,8 @@ Before taking live orders, cancel any open test orders (the plugin sends open or
 
 ## Documentation
 
-- **Guide:** [docs.printtrail.com/channels/medusa](https://docs.printtrail.com/channels/medusa/), for setting the plugin up and using it day to day.
-- **Reference:** [docs.printtrail.com/developers/medusa-plugin](https://docs.printtrail.com/developers/medusa-plugin/), for every option, rate cards, pre-orders, notifications, the workflows and hooks, events, jobs, API routes and troubleshooting.
+- **Guide:** [docs.printtrail.com/integrations/medusa](https://docs.printtrail.com/integrations/medusa/), for setting the plugin up and using it day to day.
+- **Reference:** [docs.printtrail.com/integrations/medusa-reference](https://docs.printtrail.com/integrations/medusa-reference/), for every option, rate cards, pre-orders, notifications, the workflows and hooks, events, jobs, API routes and troubleshooting.
 
 - [Changelog](https://github.com/consilience/medusa-plugin-print-trail/blob/main/CHANGELOG.md), with each release's upgrade notes.
 - [Contributing](https://github.com/consilience/medusa-plugin-print-trail/blob/main/CONTRIBUTING.md): developing and testing the plugin.
