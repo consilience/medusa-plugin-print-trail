@@ -43,9 +43,9 @@ DB_HOST=localhost DB_USERNAME=<pg user> DB_PASSWORD=<pg password> npm run test:i
 DB_HOST=localhost DB_USERNAME=<pg user> DB_PASSWORD=<pg password> npm run test:integration:http
 ```
 
-- **The HTTP harness** boots a real Medusa app from `integration-tests/http/app` with the plugin loaded from its build, against the bundled mock on `127.0.0.1:4310`. It loads `.medusa/server`, so `test:integration:http` runs `npm run build` first.
+- **The HTTP harness** boots a real Medusa app from `integration-tests/http/app` with the plugin loaded from its build, against the bundled mock on `127.0.0.1:4310`. It loads `.medusa/server`, so `test:integration:http` runs `npm run build` first. Each spec file boots its own app in the one Jest process, and not all of an app's memory is given back when it shuts down, so the script raises Node's heap limit to 4 GB. A test that waits for the SKU check queue (`settleSkuChecks`) fails if the queue hasn't drained within 15 seconds.
 - **`DB_HOST=localhost`, not `127.0.0.1`, for the test runner.** Medusa's test runner turns on SSL whenever the database URL doesn't contain `localhost`, and a plain local Postgres refuses SSL. The mock is the other way round: use `127.0.0.1` for it, because `localhost` can resolve to another process.
-- **`REDIS_URL`** (for example `redis://localhost:6379`) switches the harness to Redis locking and turns on the concurrent-send test. Without it, that test is skipped.
+- **`REDIS_URL`** (for example `redis://localhost:6379`) switches the harness to Redis locking and turns on the concurrent-send test. Without it, that test is skipped. Each spec file's app takes its locks under its own Redis namespace, so a lock an app held when it shut down doesn't hold up the next file.
 - **`npm run test:staging`** runs a smoke test against Print Trail staging by hand. It needs `PT_STAGING_BASE_URL`, `PT_STAGING_CHANNEL_ID`, `PT_STAGING_API_TOKEN` and `PT_STAGING_SKUS` (comma-separated SKUs the staging channel can order), and refuses any host that isn't `https` under `consilstaging.com`, or is a `printtrail.com` host. With none of the variables set it is skipped. Its orders are numbered `CI-<run id>-<attempt>-<n>` (locally `CI-local<timestamp>-<n>`) and cancelled at the end.
 
 No test, script or CI job reaches Print Trail production.
