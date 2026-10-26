@@ -1,6 +1,6 @@
 import type { SkuProblem, StockRunView } from "../admin-types"
-import { SKU_CHECK_KEY } from "../sku-check"
 import type { StockLastRun } from "../stock-flow"
+import { storedCheck, type VariantCheckRow } from "../variant-checks"
 
 const PROBLEM_STATUSES = new Set(["inactive", "not-found", "no-sku", "error"])
 
@@ -14,13 +14,18 @@ type HealthVariant = {
 }
 
 // Problems are listed; variants never checked are only counted (the SKU
-// check runs on save, so an existing catalogue would flood the list).
-export function skuProblems(variants: HealthVariant[]): { problems: SkuProblem[]; unchecked: number } {
+// check runs on save, so an existing catalogue would flood the list). rows:
+// the variants' print_trail_variant rows by variant id; a variant without one
+// shows its legacy check from metadata.
+export function skuProblems(
+  variants: HealthVariant[],
+  rows: Map<string, VariantCheckRow>
+): { problems: SkuProblem[]; unchecked: number } {
   const problems: SkuProblem[] = []
   let unchecked = 0
   for (const v of variants) {
-    const check = v.metadata?.[SKU_CHECK_KEY] as { sku?: unknown; status?: unknown; checked_at?: unknown } | undefined
-    if (!check || typeof check !== "object" || typeof check.status !== "string") {
+    const check = storedCheck(rows.get(v.id), v.metadata)
+    if (!check) {
       unchecked++
       continue
     }
@@ -30,9 +35,9 @@ export function skuProblems(variants: HealthVariant[]): { problems: SkuProblem[]
       product_id: v.product_id,
       product_title: v.product?.title ?? null,
       variant_title: v.title ?? null,
-      sku: typeof check.sku === "string" ? check.sku : null,
+      sku: check.sku,
       status: check.status,
-      checked_at: typeof check.checked_at === "string" ? check.checked_at : null,
+      checked_at: check.checked_at || null,
     })
   }
   return { problems, unchecked }

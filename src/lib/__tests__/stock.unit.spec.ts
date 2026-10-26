@@ -4,7 +4,9 @@ import {
   dispatchedSkus,
   mergeUnmatched,
   planStockSync,
+  readUnmatchedSkus,
   shortfallSkus,
+  STATE_KEYS,
   stockFigure,
   type StockVariant,
 } from "../stock"
@@ -361,6 +363,22 @@ describe("mergeUnmatched and shortfallSkus", () => {
     ).toEqual(["A", "B"])
     expect(shortfallSkus(null)).toEqual([])
     expect(shortfallSkus({ sku: "A" })).toEqual([])
+  })
+})
+
+describe("readUnmatchedSkus", () => {
+  it("unions the stock sync's list, the not-found checks and the legacy list, case-insensitively", async () => {
+    const values: Record<string, unknown> = {
+      [STATE_KEYS.unmatched]: { skus: ["both", "STOCK-1"] },
+      [STATE_KEYS.skuCheckUnmatched]: { skus: ["LEGACY-1", "stock-1"] },
+    }
+    const store = {
+      getState: async <T,>(key: string) => (values[key] as T | undefined) ?? null,
+      notFoundSkus: async () => ["not-1", "BOTH"],
+    }
+    expect(await readUnmatchedSkus(store)).toEqual(["both", "LEGACY-1", "not-1", "STOCK-1"])
+    delete values[STATE_KEYS.skuCheckUnmatched]
+    expect(await readUnmatchedSkus(store)).toEqual(["both", "not-1", "STOCK-1"])
   })
 })
 

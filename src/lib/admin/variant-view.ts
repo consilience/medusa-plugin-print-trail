@@ -1,8 +1,9 @@
-import type { SkuCheckDto, VariantView } from "../admin-types"
-import { isCheckCurrent, SKU_CHECK_KEY } from "../sku-check"
+import type { VariantView } from "../admin-types"
+import { isCheckCurrent } from "../sku-check"
 import { isNumericOverride, overrideOf, resolveSku } from "../sku"
 import type { PreOrderSku } from "../pre-order"
 import { BACKORDER_MARKER_KEY } from "../stock"
+import { storedCheck, type VariantCheckRow } from "../variant-checks"
 
 type ViewVariant = {
   sku?: string | null
@@ -11,20 +12,23 @@ type ViewVariant = {
   allow_backorder?: boolean
 }
 
-const asCheck = (v: unknown): SkuCheckDto | null =>
-  v && typeof v === "object" && !Array.isArray(v) && typeof (v as SkuCheckDto).status === "string" ? (v as SkuCheckDto) : null
-
 // ctx.preOrder: the stock sync's pre_order_skus entry for the resolved SKU;
 // null when the record exists and doesn't list it; undefined when there's no
 // record (an older Print Trail API sends no status), so the SKU check's
-// status is the only source.
+// status is the only source. ctx.row: the variant's print_trail_variant row;
+// without one, the legacy check in its metadata is shown.
 export function toVariantView(
   variant: ViewVariant,
-  ctx: { inPtProfile: boolean; available: number | null; preOrder?: Omit<PreOrderSku, "sku"> | null }
+  ctx: {
+    inPtProfile: boolean
+    available: number | null
+    preOrder?: Omit<PreOrderSku, "sku"> | null
+    row?: VariantCheckRow | null
+  }
 ): VariantView {
   const metadata = variant.metadata ?? null
   const resolved = resolveSku(variant)
-  const check = asCheck(metadata?.[SKU_CHECK_KEY])
+  const check = storedCheck(ctx.row, metadata)
   return {
     in_print_trail_profile: ctx.inPtProfile,
     sku: variant.sku ?? null,

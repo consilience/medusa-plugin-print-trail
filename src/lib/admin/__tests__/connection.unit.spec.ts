@@ -45,6 +45,9 @@ const memoryState = (initial: Record<string, unknown> = {}) => {
       writes.push(key)
       map.set(key, value)
     },
+    async notFoundSkus(): Promise<string[]> {
+      return []
+    },
   }
 }
 

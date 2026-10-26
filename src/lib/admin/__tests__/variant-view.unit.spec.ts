@@ -1,4 +1,18 @@
+import type { VariantCheckRow } from "../../variant-checks"
 import { toVariantView } from "../variant-view"
+
+const row = (over: Partial<VariantCheckRow>): VariantCheckRow => ({
+  id: "ptvar_1",
+  variant_id: "variant_1",
+  product_id: "prod_1",
+  check_sku: null,
+  check_status: null,
+  check_matched_sku: null,
+  check_note: null,
+  checked_at: null,
+  check_source: null,
+  ...over,
+})
 
 describe("variant view", () => {
   it("resolves the override and reports print on demand", () => {
@@ -41,6 +55,25 @@ describe("variant view", () => {
     expect(stale).toMatchObject({ override: null, resolved_sku: "TEE-1", check_current: false, in_print_trail_profile: false })
     expect(stale.stock).toMatchObject({ manage_inventory: false, allow_backorder: false, available: null, print_on_demand: false, pre_order: false })
     expect(toVariantView({ sku: null, metadata: null }, { inPtProfile: true, available: null })).toMatchObject({ check: null, check_current: false, resolved_sku: null })
+  })
+
+  it("reads the variant's row first, and its legacy check until it has one", () => {
+    const at = "2026-10-19T12:00:00.000Z"
+    const metadata = { print_trail_sku_check: { sku: "A", status: "not-found", checked_at: "t" } }
+    const fromRow = toVariantView(
+      { sku: "A", metadata },
+      { inPtProfile: true, available: null, row: row({ check_sku: "A", check_status: "matched", checked_at: at }) }
+    )
+    expect(fromRow).toMatchObject({ check: { sku: "A", status: "matched", checked_at: at }, check_current: true })
+    expect(toVariantView({ sku: "A", metadata }, { inPtProfile: true, available: null, row: null })).toMatchObject({
+      check: { sku: "A", status: "not-found", checked_at: "t" },
+      check_current: true,
+    })
+    // Cleared for a re-check: no check, though the legacy one is still there.
+    expect(toVariantView({ sku: "A", metadata }, { inPtProfile: true, available: null, row: row({}) })).toMatchObject({
+      check: null,
+      check_current: false,
+    })
   })
 
   it("treats a string backorder marker as not print on demand", () => {

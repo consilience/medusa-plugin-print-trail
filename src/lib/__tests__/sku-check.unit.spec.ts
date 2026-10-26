@@ -4,7 +4,6 @@ import {
   checkFromResult,
   checkVariantSkus,
   isCheckCurrent,
-  SKU_CHECK_KEY,
   unmatchedSkusFromEvents,
   type CheckVariant,
   type SkuCheck,
@@ -13,6 +12,7 @@ import {
 } from "../sku-check"
 import { readUnmatchedSkus, STATE_KEYS } from "../stock"
 import type { StateStore } from "../team-code"
+import { LEGACY_SKU_CHECK_KEY, legacyCheckOf } from "../variant-checks"
 
 const NOW = new Date("2026-10-19T12:00:00Z")
 const PT = "sp_pt"
@@ -31,32 +31,40 @@ class MemoryState implements StateStore {
 }
 
 type Row = { id: string; order_id: string; sequence: number; unmatchedSkus: string[] | null }
+type FakeVariant = Omit<CheckVariant, "check" | "hasRow">
 
 class FakePort implements SkuCheckPort {
-  writes: { variantId: string; check: SkuCheck }[] = []
+  writes: { variantId: string; productId: string; check: SkuCheck }[] = []
   resends: { orderId: string; sequence: number }[] = []
   rows: Row[] = []
   orders: { orderId: string; canceled: boolean; variantIds: string[] }[] = []
-  constructor(public variants: (CheckVariant & { productId: string })[]) {}
+  // The variants' print_trail_variant rows: variant id → its check (null:
+  // cleared for a re-check). A variant without one reads its legacy check.
+  checkRows = new Map<string, SkuCheck | null>()
+  constructor(public variants: FakeVariant[]) {}
   async ptProfileIds() {
     return [PT]
   }
   async loadVariants(input: { variantIds?: string[]; productId?: string }) {
+    const picked = this.variants.filter((v) => (input.variantIds ? input.variantIds.includes(v.id) : v.productId === input.productId))
     return JSON.parse(
       JSON.stringify(
-        this.variants.filter((v) => (input.variantIds ? input.variantIds.includes(v.id) : v.productId === input.productId))
+        picked.map((v) => ({
+          ...v,
+          check: this.checkRows.has(v.id) ? (this.checkRows.get(v.id) ?? null) : legacyCheckOf(v.metadata),
+          hasRow: this.checkRows.has(v.id),
+        }))
       )
     ) as CheckVariant[]
   }
   failWriteFor: string | null = null
-  async writeCheck(variantId: string, check: SkuCheck) {
-    if (this.failWriteFor === variantId) {
+  async writeCheck(variant: { id: string; productId: string }, check: SkuCheck) {
+    if (this.failWriteFor === variant.id) {
       this.failWriteFor = null
       throw new Error("write failed")
     }
-    this.writes.push({ variantId, check })
-    const v = this.variants.find((x) => x.id === variantId)!
-    v.metadata = { ...(v.metadata ?? {}), [SKU_CHECK_KEY]: check }
+    this.writes.push({ variantId: variant.id, productId: variant.productId, check })
+    this.checkRows.set(variant.id, JSON.parse(JSON.stringify(check)))
   }
   async blockedRows() {
     return this.rows
@@ -67,12 +75,15 @@ class FakePort implements SkuCheckPort {
   async resend(orderId: string, sequence: number) {
     this.resends.push({ orderId, sequence })
   }
+  async notFoundSkus() {
+    return [...this.checkRows.values()].flatMap((c) => (c?.status === "not-found" && c.sku ? [c.sku] : []))
+  }
   check(id: string) {
-    return this.variants.find((v) => v.id === id)!.metadata?.[SKU_CHECK_KEY] as SkuCheck | undefined
+    return this.checkRows.get(id) ?? undefined
   }
 }
 
-const v = (id: string, sku: string | null, over: Partial<CheckVariant & { productId: string }> = {}) => ({
+const v = (id: string, sku: string | null, over: Partial<FakeVariant> = {}): FakeVariant => ({
   id,
   sku,
   metadata: null,
@@ -87,9 +98,12 @@ let port: FakePort
 let ctx: SkuCheckContext
 let refreshed: string[][]
 
+// What the unmatched notice reads: the state rows and the not-found checks.
+const unmatchedStore = () => ({ getState: state.getState.bind(state), notFoundSkus: () => port.notFoundSkus() })
+
 const validateCalls = () => mock.state.requests.filter((r) => r.path.endsWith("/products/validate-skus")).length
 
-const setup = (variants: ReturnType<typeof v>[]) => {
+const setup = (variants: FakeVariant[]) => {
   port = new FakePort(variants)
   ctx = {
     client: new PrintTrailClient({ baseUrl: mock.url, channelId: "acme-medusa1", apiToken: "t", retryDelays: [0] }),
@@ -159,7 +173,9 @@ describe("checkVariantSkus", () => {
       ["v4", "not-found"],
     ])
     expect(port.check("v1")).toEqual({ sku: "SKU-ACTIVE", status: "matched", checked_at: NOW.toISOString() })
-    expect(state.unmatched()).toEqual(["NOPE"])
+    // The notice reads the not-found check from its row.
+    expect(state.unmatched()).toBeUndefined()
+    expect(await readUnmatchedSkus(unmatchedStore())).toEqual(["NOPE"])
   })
 
   it("makes no call and no write when the check is current", async () => {
@@ -205,14 +221,14 @@ describe("checkVariantSkus", () => {
     expect(port.writes).toHaveLength(1)
   })
 
-  it("re-checks when the override changes and forgets the old SKU", async () => {
+  it("re-checks when the override changes, and the old SKU leaves the notice", async () => {
     setup([v("v1", "NOPE-OLD")])
     await checkVariantSkus(ctx, { variantIds: ["v1"] })
-    expect(state.unmatched()).toEqual(["NOPE-OLD"])
+    expect(await readUnmatchedSkus(unmatchedStore())).toEqual(["NOPE-OLD"])
     port.variants[0].sku = "SKU-ACTIVE"
     const out = await checkVariantSkus(ctx, { variantIds: ["v1"] })
     expect(out.checked[0].check).toMatchObject({ sku: "SKU-ACTIVE", status: "matched" })
-    expect(state.unmatched()).toEqual([])
+    expect(await readUnmatchedSkus(unmatchedStore())).toEqual([])
     expect(validateCalls()).toBe(2)
   })
 
@@ -271,7 +287,7 @@ describe("checkVariantSkus", () => {
     setup([v("v1", "NOPE"), v("v2", "SKU-ACTIVE")])
     await checkVariantSkus(ctx, { productId: "prod_1" })
     expect(state.values.get(STATE_KEYS.unmatched)).toEqual({ skus: ["FROM-STOCK"], updatedAt: "x" })
-    expect(await readUnmatchedSkus(state)).toEqual(["FROM-STOCK", "NOPE"])
+    expect(await readUnmatchedSkus(unmatchedStore())).toEqual(["FROM-STOCK", "NOPE"])
   })
 
   it("re-sends an order blocked on unmatched SKUs once the variant matches", async () => {
@@ -305,7 +321,7 @@ describe("checkVariantSkus", () => {
     // was missing (numeric override).
     setup([
       v("v1", "123", {
-        metadata: { print_trail_sku: 123, [SKU_CHECK_KEY]: { sku: "123", status: "matched", checked_at: "x" } },
+        metadata: { print_trail_sku: 123, [LEGACY_SKU_CHECK_KEY]: { sku: "123", status: "matched", checked_at: "x" } },
       }),
     ])
     mock.state.stock["123"] = 1
@@ -348,6 +364,71 @@ describe("checkVariantSkus", () => {
     expect(port.resends).toEqual([{ orderId: "order_1", sequence: 1 }])
     expect(refreshed.flat().sort()).toEqual(["SKU-ACTIVE", "SKU-PRE"])
     expect(state.values.get(STATE_KEYS.skuCheckFollowUps) ?? null).toBeNull()
+  })
+
+  it("a check is written to the variant's row and not to its metadata", async () => {
+    setup([v("v1", "SKU-ACTIVE", { productId: "prod_9", metadata: { store_key: "kept" } })])
+    await checkVariantSkus(ctx, { variantIds: ["v1"] })
+    expect(port.writes).toEqual([
+      { variantId: "v1", productId: "prod_9", check: { sku: "SKU-ACTIVE", status: "matched", checked_at: NOW.toISOString() } },
+    ])
+    expect(port.variants[0].metadata).toEqual({ store_key: "kept" })
+  })
+
+  it("a legacy check is read until the variant has a row", async () => {
+    const legacy = (sku: string) => ({ [LEGACY_SKU_CHECK_KEY]: { sku, status: "matched", checked_at: "x" } })
+    setup([v("v1", "SKU-ACTIVE", { metadata: legacy("SKU-ACTIVE") }), v("v2", "SKU-PRE", { metadata: legacy("SKU-OLD") })])
+    const out = await checkVariantSkus(ctx, { productId: "prod_1" })
+    // v1's legacy check is current: no call for it, and no row yet.
+    expect(out.skipped).toEqual(["v1"])
+    expect(port.checkRows.has("v1")).toBe(false)
+    // v2's is stale: re-checked, and the result goes to a row.
+    expect(validateCalls()).toBe(1)
+    expect(mock.state.requests.find((r) => r.path.endsWith("/products/validate-skus"))!.body.skus).toEqual(["SKU-PRE"])
+    expect(port.check("v2")).toMatchObject({ sku: "SKU-PRE", status: "pre-order" })
+  })
+
+  it("a legacy check equal to the new result still gets a row", async () => {
+    setup([v("v1", "SKU-ACTIVE", { metadata: { [LEGACY_SKU_CHECK_KEY]: { sku: "SKU-ACTIVE", status: "error", checked_at: NOW.toISOString() } } })])
+    mock.fail(/validate-skus/, 400, { message: "Bad request" }, 1)
+    await checkVariantSkus(ctx, { variantIds: ["v1"] })
+    expect(port.writes).toHaveLength(1)
+    expect(port.check("v1")).toMatchObject({ sku: "SKU-ACTIVE", status: "error" })
+  })
+
+  it("a cleared row is re-checked although its legacy metadata check is current", async () => {
+    setup([v("v1", "SKU-ACTIVE", { metadata: { [LEGACY_SKU_CHECK_KEY]: { sku: "SKU-ACTIVE", status: "matched", checked_at: "x" } } })])
+    port.checkRows.set("v1", null)
+    const out = await checkVariantSkus(ctx, { variantIds: ["v1"] })
+    expect(out.skipped).toEqual([])
+    expect(validateCalls()).toBe(1)
+    expect(port.check("v1")).toMatchObject({ status: "matched" })
+  })
+
+  it("follow-ups run when a legacy not-found becomes matched", async () => {
+    // Re-checked because the override is numeric and the legacy check has no note.
+    mock.state.stock["123"] = 1
+    setup([v("v1", "123", { metadata: { print_trail_sku: 123, [LEGACY_SKU_CHECK_KEY]: { sku: "123", status: "not-found", checked_at: "x" } } })])
+    port.rows = [{ id: "pto_1", order_id: "order_1", sequence: 1, unmatchedSkus: ["123"] }]
+    port.orders = [{ orderId: "order_1", canceled: false, variantIds: ["v1"] }]
+    const out = await checkVariantSkus(ctx, { variantIds: ["v1"] })
+    expect(out.checked[0].check).toMatchObject({ status: "matched", note: "numeric-override" })
+    expect(out.newlyMatched).toEqual(["123"])
+    expect(port.resends).toEqual([{ orderId: "order_1", sequence: 1 }])
+    expect(refreshed).toEqual([["123"]])
+  })
+
+  it("the SKU check never adds to the legacy unmatched list, and forgets from it while it exists", async () => {
+    setup([v("v1", "NOPE")])
+    await checkVariantSkus(ctx, { variantIds: ["v1"] })
+    expect(state.values.has(STATE_KEYS.skuCheckUnmatched)).toBe(false)
+
+    await state.setState(STATE_KEYS.skuCheckUnmatched, { skus: ["Other", "SKU-ACTIVE"], updatedAt: "x" })
+    setup([v("v2", "NOPE-2"), v("v3", "sku-active")])
+    await checkVariantSkus(ctx, { productId: "prod_1" })
+    expect(state.unmatched()).toEqual(["Other"])
+    // The notice still has the not-found SKU, from its row.
+    expect(await readUnmatchedSkus(unmatchedStore())).toEqual(["NOPE-2", "Other"])
   })
 
   it("doesn't re-send for an inactive SKU", async () => {

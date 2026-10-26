@@ -23,7 +23,9 @@ export const STATE_KEYS = {
   lastRun: "stock_last_run",
   // Written only by the stock sync, under the stock lock.
   unmatched: "unmatched_skus",
-  // Written only by the SKU check: not-found results since the last sync.
+  // 0.2.0's list of the SKU check's not-found results. Read-only since
+  // 1.0.0 (the not-found checks are rows now): the SKU check only forgets
+  // SKUs from it, and the metadata scan deletes it once complete.
   skuCheckUnmatched: "sku_check_unmatched",
   // The SKU check's own failure count (apart from the stock sync's).
   skuCheckFailures: "sku_check_failures",
@@ -448,15 +450,21 @@ export function shortfallSkus(shortfall: unknown): string[] {
   )
 }
 
-// The unmatched SKUs for the health page: the last stock sync's list plus the
-// SKU check's not-found results. Two keys, so neither writer clobbers the
-// other.
-export async function readUnmatchedSkus(state: {
+// What readUnmatchedSkus reads; PrintTrailModuleService satisfies it.
+export type UnmatchedSkuStore = {
   getState<T>(key: string): Promise<T | null>
-}): Promise<string[]> {
-  const stock = (await state.getState<{ skus: string[] }>(STATE_KEYS.unmatched))?.skus ?? []
-  const checked = (await state.getState<{ skus: string[] }>(STATE_KEYS.skuCheckUnmatched))?.skus ?? []
-  return mergeUnmatched(stock, { add: checked })
+  // The SKUs whose stored check is not-found (print_trail_variant).
+  notFoundSkus(): Promise<string[]>
+}
+
+// The unmatched SKUs for the health page and the notice: the last stock
+// sync's list, the SKU checks' not-found results (which leave with the
+// variant's row), and the list 0.2.0's SKU check kept, while it exists.
+export async function readUnmatchedSkus(store: UnmatchedSkuStore): Promise<string[]> {
+  const stock = (await store.getState<{ skus: string[] }>(STATE_KEYS.unmatched))?.skus ?? []
+  const notFound = await store.notFoundSkus()
+  const legacy = (await store.getState<{ skus: string[] }>(STATE_KEYS.skuCheckUnmatched))?.skus ?? []
+  return mergeUnmatched(stock, { add: [...notFound, ...legacy] })
 }
 
 type StoredLine = { lineNumber?: string | null; product?: { sku?: string | null } | null }

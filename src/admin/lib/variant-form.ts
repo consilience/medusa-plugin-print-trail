@@ -1,8 +1,9 @@
 // Medusa before 2.19 replaces a variant's metadata on update (the product
 // module's updateVariants_ uses upsertWithReplace), so the SKU override is
 // saved by sending the variant's whole current metadata with only
-// print_trail_sku changed. Sending the key alone would erase the SKU check
-// and the print-on-demand marker. From 2.19.0 Medusa merges the update into
+// print_trail_sku changed. Sending the key alone would erase the variant's
+// other keys: the store's own and the stock sync's print_trail_pre_order.
+// From 2.19.0 Medusa merges the update into
 // the stored metadata, so leaving the key out would keep it: an empty value
 // removes the override by sending print_trail_sku as "", Medusa's way to
 // delete a metadata key. Before 2.19 that stores "", which the plugin reads
