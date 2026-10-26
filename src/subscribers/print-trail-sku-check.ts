@@ -11,8 +11,12 @@ const VARIANT_EVENTS = ["product-variant.updated", "product-variant.created"]
 // Trail SKU check, then drains the queue under the print-trail:sku-check lock.
 // A bulk import's events coalesce into batches of 250; when another run holds
 // the lock, it (or the sweep) picks the variants up. The check is stored in
-// the plugin's own table, so writing it fires no event; the stock sync's
-// metadata writes do, and find the check current, so nothing is called.
+// the plugin's own table, so writing it fires no event. The plugin's
+// metadata writes (the stock sync's pre-order flag, the upgrade scan's
+// deletion of the old keys) do: a variant whose check is current calls
+// nothing, but one whose check is "error" (couldn't check), or whose SKU no
+// longer matches the one it was checked with, is checked with Print Trail
+// again.
 export default async function printTrailSkuCheckHandler({ event, container }: SubscriberArgs<{ id: string }>) {
   const logger = container.resolve(ContainerRegistrationKeys.LOGGER)
   const id = event.data?.id

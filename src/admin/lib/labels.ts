@@ -156,3 +156,11 @@ export function stockSyncToast(view: StockSyncNowView): Label & { variant: "succ
 
 // The button's tooltip while the stock sync is turned off.
 export const stockSyncUnavailableKey = "settings.sku.syncNow.unavailable"
+
+// SKU health couldn't be loaded (a store that hasn't run its migrations since
+// upgrading, most likely): the section's text and the Sync stock now
+// button's tooltip. Medusa's own message ends with a full stop.
+export function skuHealthFailed(message: string): Label {
+  const detail = message.trim().replace(/\.$/, "")
+  return detail ? { key: "settings.sku.loadFailed", values: { message: detail } } : { key: "settings.sku.loadFailedNoDetail" }
+}

@@ -294,9 +294,11 @@ class PrintTrailModuleService extends MedusaService({
   // tries the page again. With no row, the create is tried once more, so a
   // passing failure isn't taken for a bad row; failing again, the check is
   // skipped and logged, so one row the database refuses can't hold the scan
-  // back for good. (Its legacy key is still deleted: the variant is checked
-  // again when it's next saved.) The error itself isn't relied on: Postgres
-  // gives some refusals of a row's data a connection-class code.
+  // back for good. (Its legacy key is still deleted, and that metadata write
+  // sends product-variant.updated, so the SKU check finds no row and checks
+  // the variant with Print Trail within one drain.) The error itself isn't
+  // relied on: Postgres gives some refusals of a row's data a
+  // connection-class code.
   private async adoptOne(data: VariantRowInput): Promise<boolean> {
     const hasRow = async () => (await this.listPrintTrailVariants({ variant_id: data.variant_id }, { select: ["id"] })).length > 0
     let error: unknown

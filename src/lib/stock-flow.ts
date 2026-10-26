@@ -480,8 +480,11 @@ export const VARIANT_ROW_PAGE = 500
 // rejoins a profile is checked again when it's saved. The run read the
 // products at its start, so a row created or updated since `startedAt` is
 // left for the next full run: its product may have joined a profile in the
-// meantime (a bulk import, say). A failure is logged; the run still
-// completes.
+// meantime (a bulk import, say). A row's times come from the clock of the
+// app instance that wrote it, so with several instances skew between their
+// clocks only shifts the cut-off: a row written within the skew of the
+// start is judged one run early or left one run late. A failure is logged;
+// the run still completes.
 export async function pruneVariantRows(ctx: StockContext, ptProducts: Set<string>, startedAt: Date): Promise<void> {
   const since = startedAt.getTime()
   const writtenSince = (r: VariantCheckRow) =>

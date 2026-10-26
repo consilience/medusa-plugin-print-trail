@@ -11,6 +11,7 @@ import {
   statusColor,
   onlyWaitingForRelease,
   secretSourceKey,
+  skuHealthFailed,
   stockSyncToast,
   stockSyncUnavailableKey,
   warningKey,
@@ -138,6 +139,22 @@ describe("stockSyncToast", () => {
     expect(stockSyncToast({ status: "completed", summary: "3 levels updated" }).values).toEqual({ summary: "3 levels updated" })
     expect(stockSyncToast({ status: "failed", summary: "failed: Print Trail said no" }).values).toEqual({ reason: "Print Trail said no" })
     expect(en.settings.sku.syncNow.deferred).toBe("A stock sync is already running. This one runs after it, within one sweep.")
+  })
+})
+
+// SKU health that fails to load shows why instead of loading for ever.
+describe("skuHealthFailed", () => {
+  it("names the error and suggests the migration, with an English string", () => {
+    const failed = skuHealthFailed("An unknown error occurred.")
+    expect(failed).toEqual({ key: "settings.sku.loadFailed", values: { message: "An unknown error occurred" } })
+    expect(skuHealthFailed("")).toEqual({ key: "settings.sku.loadFailedNoDetail" })
+    expect(skuHealthFailed("  ")).toEqual({ key: "settings.sku.loadFailedNoDetail" })
+    for (const key of ["settings.sku.loadFailed", "settings.sku.loadFailedNoDetail"]) {
+      expect(has(key)).toBe(true)
+    }
+    expect(en.settings.sku.loadFailed).toContain("{{message}}")
+    expect(en.settings.sku.loadFailed).toContain("npx medusa db:migrate")
+    expect(en.settings.sku.loadFailedNoDetail).toContain("npx medusa db:migrate")
   })
 })
 

@@ -214,12 +214,15 @@ class MemoryVariantRows {
     this.hit("queueChecks")
     for (const id of ids) if (!this.queued.includes(id)) this.queued.push(id)
   }
+  // Variants whose row the database refuses: skipped and logged by the
+  // service, not thrown.
+  refused = new Set<string>()
   // Creates only the missing rows; a row written meanwhile wins.
   async adopt(checks: { variantId: string; productId: string; check: SkuCheck }[]) {
     this.hit("adopt")
     let created = 0
     for (const c of checks) {
-      if (this.get(c.variantId)) continue
+      if (this.get(c.variantId) || this.refused.has(c.variantId)) continue
       this.rows.push({ id: `ptvar_${c.variantId}`, variant_id: c.variantId, product_id: c.productId, ...checkColumns(c.check, "metadata") })
       created++
     }
@@ -1368,6 +1371,21 @@ describe("the variant metadata scan", () => {
       await scanPluginMetadata(ctx, run(), limits())
       expect(variantRows.get("v1")).toMatchObject({ check_status: "not-found", check_source: "metadata" })
       expect(variantOf("v1").skuCheck).toBeUndefined()
+    })
+
+    // Unlike a failed adoption (above), a row the database refuses doesn't
+    // stop the page: the key's deletion is a metadata write, whose
+    // product-variant.updated has the SKU check check the variant again.
+    it("a check the database refuses isn't adopted, and its key is still deleted", async () => {
+      variantOf("v1").skuCheck = legacy("OWN-v1")
+      variantOf("v2").skuCheck = legacy("OWN-v2")
+      variantRows.refused.add("v2")
+      await scanPluginMetadata(ctx, run(), limits())
+      expect(variantRows.get("v1")).toMatchObject({ check_sku: "OWN-v1", check_source: "metadata" })
+      expect(variantRows.get("v2")).toBeUndefined()
+      expect(variantOf("v2").skuCheck).toBeUndefined()
+      expect(catalogue.legacyDeletes().flat()).toContainEqual({ id: "v2", preOrderField: false })
+      expect(scan()).toMatchObject({ checks: 1, completedAt: NOW.toISOString() })
     })
 
     it("a check outside Print Trail's profiles isn't adopted, but is deleted", async () => {

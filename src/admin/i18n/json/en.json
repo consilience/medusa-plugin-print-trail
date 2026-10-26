@@ -94,6 +94,8 @@
       "lastRunSummary": "{{trigger}}, {{at}}: {{levels}} stock levels updated, {{skipped}} variants skipped",
       "lastRunError": "The last stock sync failed: {{error}}",
       "stockSyncOff": "Stock sync is turned off.",
+      "loadFailed": "SKU health couldn't be loaded ({{message}}). If the plugin was just upgraded, run npx medusa db:migrate, then reload this page.",
+      "loadFailedNoDetail": "SKU health couldn't be loaded. If the plugin was just upgraded, run npx medusa db:migrate, then reload this page.",
       "syncNow": {
         "button": "Sync stock now",
         "unavailable": "Stock sync is turned off in the plugin's options.",

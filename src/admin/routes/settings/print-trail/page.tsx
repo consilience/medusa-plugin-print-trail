@@ -23,7 +23,9 @@ import { confirmationSteps } from "../../../lib/webhook-confirm"
 import {
   checkBadge,
   diagnosisKey,
+  type Label,
   secretSourceKey,
+  skuHealthFailed,
   stockSyncToast,
   stockSyncUnavailableKey,
   warningKey,
@@ -245,17 +247,29 @@ const MethodsSection = ({ view }: { view: ConnectionView }) => {
 }
 
 // "Sync stock now": a full stock sync, waited for. Turned off with the
-// stock sync, with the reason as its tooltip.
-const SyncStockButton = ({ health, onSync, syncing }: { health: SkuHealthView | undefined; onSync: () => void; syncing: boolean }) => {
+// stock sync, or when SKU health couldn't be loaded, with the reason as its
+// tooltip.
+const SyncStockButton = ({
+  health,
+  loadFailed,
+  onSync,
+  syncing,
+}: {
+  health: SkuHealthView | undefined
+  loadFailed: Label | null
+  onSync: () => void
+  syncing: boolean
+}) => {
   const { t } = useTranslation("printTrail")
   const unavailable = health !== undefined && !health.stockSyncEnabled
+  const reason = loadFailed ? t(loadFailed.key, loadFailed.values) : unavailable ? t(stockSyncUnavailableKey) : null
   const button = (
     <Button size="small" variant="secondary" onClick={onSync} isLoading={syncing} disabled={syncing || !health || unavailable}>
       {t("settings.sku.syncNow.button")}
     </Button>
   )
-  return unavailable ? (
-    <Tooltip content={t(stockSyncUnavailableKey)}>
+  return reason ? (
+    <Tooltip content={reason}>
       <span>{button}</span>
     </Tooltip>
   ) : (
@@ -266,22 +280,28 @@ const SyncStockButton = ({ health, onSync, syncing }: { health: SkuHealthView | 
 const SkuHealthSection = ({
   health,
   loading,
+  loadFailed,
   onSync,
   syncing,
 }: {
   health: SkuHealthView | undefined
   loading: boolean
+  loadFailed: Label | null
   onSync: () => void
   syncing: boolean
 }) => {
   const { t } = useTranslation("printTrail")
   const run = health?.lastRun ?? null
   return (
-    <Section title={t("settings.sku.heading")} id="sku-health" actions={<SyncStockButton health={health} onSync={onSync} syncing={syncing} />}>
+    <Section
+      title={t("settings.sku.heading")}
+      id="sku-health"
+      actions={<SyncStockButton health={health} loadFailed={loadFailed} onSync={onSync} syncing={syncing} />}
+    >
       {loading || !health ? (
         <div className="px-6 py-4">
           <Text size="small" className="text-ui-fg-subtle">
-            {t("common.loading")}
+            {loadFailed ? t(loadFailed.key, loadFailed.values) : t("common.loading")}
           </Text>
         </div>
       ) : (
@@ -698,6 +718,7 @@ const SettingsPage = () => {
           <SkuHealthSection
             health={skuHealth.data}
             loading={skuHealth.isLoading}
+            loadFailed={skuHealth.isError && !skuHealth.data ? skuHealthFailed(errorOf(skuHealth.error).message) : null}
             onSync={() => syncStock.mutate()}
             syncing={syncStock.isPending}
           />
