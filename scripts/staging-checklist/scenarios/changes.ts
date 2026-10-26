@@ -306,9 +306,10 @@ export const crash: Scenario = {
       return
     }
     await needsPerson(t, "restart the store")
+    const minutes = Math.round(ctx.config.timeouts.crash / 60000)
     await t.check("restart the store mid-send", async () => {
       const ready = await ask(
-        "\n  >>> Crash safety: the script places an order, then asks you to restart the Medusa server and worker at once\n      (for example `pm2 restart <server> <worker>`). Ready? [y/s] "
+        `\n  >>> Crash safety: the script places an order, then asks you to restart the Medusa server and worker at once\n      (for example \`pm2 restart <server> <worker>\`). Confirming the order can then take up to ${minutes} min:\n      a send cut off by the restart is retried after its lease, on the next sweep. Ready? [y/s] `
       )
       if (!ready.trim().toLowerCase().startsWith("y")) manual("skipped by the tester")
       return "ready"
@@ -323,7 +324,15 @@ export const crash: Scenario = {
       return `order #${order.displayId}`
     })
     await t.check("sent and confirmed once after the restart", async () => {
-      const { row } = await waitForRow(t, orderId, "the order to be confirmed (the sweep runs on PRINT_TRAIL_SWEEP_SCHEDULE)", (r) => !!r.confirmed_at, ctx.config.timeouts.sweep)
+      // An interrupted send keeps its lease's next attempt (the plugin's retry
+      // delay), so the sweep only retries it after that.
+      const { row } = await waitForRow(
+        t,
+        orderId,
+        "the order to be confirmed (a send cut off by the restart is retried after its lease, by the sweep on PRINT_TRAIL_SWEEP_SCHEDULE)",
+        (r) => !!r.confirmed_at,
+        ctx.config.timeouts.crash
+      )
       ctx.state.addPtUuid(orderId, row.pt_uuid)
       const n = await countByNumber(ctx, row.pt_order_number)
       expect(n === 1, `${n} Print Trail orders numbered ${row.pt_order_number}`)

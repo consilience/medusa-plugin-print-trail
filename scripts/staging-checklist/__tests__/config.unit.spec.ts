@@ -1,7 +1,9 @@
+import { RETRY_DELAY_MS } from "../../../src/lib/retry"
 import {
   assertMockTarget,
   assertPrintTrailTarget,
   assertStoreUrl,
+  CRASH_TIMEOUT_SECONDS,
   loadConfig,
   parseArgs,
   redact,
@@ -82,6 +84,18 @@ describe("staging checklist config", () => {
     expect(config.printTrail).toEqual({ baseUrl: "http://127.0.0.1:4011", channelId: "test-channel", apiToken: "dev-token" })
     expect(config.skus.stocked).toBe("9780000000002")
     expect(config.interactive).toBe(false)
+  })
+
+  it("waits out an interrupted send's lease after the crash restart (CHECKLIST_CRASH_TIMEOUT)", () => {
+    // The plugin's retry delay, then one default sweep interval and a margin.
+    expect(CRASH_TIMEOUT_SECONDS).toBe(RETRY_DELAY_MS / 1000 + 600)
+    expect(loadConfig(parseArgs([]), env()).timeouts.crash).toBe(RETRY_DELAY_MS + 600_000)
+    // The value CONTRIBUTING.md and .env.checklist.template give.
+    expect(loadConfig(parseArgs([]), env()).timeouts.crash).toBe(1_500_000)
+    expect(loadConfig(parseArgs([]), env({ CHECKLIST_CRASH_TIMEOUT: "1800" })).timeouts.crash).toBe(1_800_000)
+    for (const bad of ["soon", "0", "-60"]) {
+      expect(() => loadConfig(parseArgs([]), env({ CHECKLIST_CRASH_TIMEOUT: bad }))).toThrow(/CHECKLIST_CRASH_TIMEOUT must be a number of seconds/)
+    }
   })
 
   it("redacts secrets and bearer tokens", () => {

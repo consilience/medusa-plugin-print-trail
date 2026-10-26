@@ -1,6 +1,7 @@
 // Arguments, environment and the safety rules. Pure: nothing here makes a
 // request, so the unit tests cover every refusal.
 import { assertStagingTarget } from "../../../integration-tests/staging/guard"
+import { RETRY_DELAY_MS } from "../../../src/lib/retry"
 import { assertStoreUrl, parseForbiddenStores, StoreGuardError, type ForbiddenStore } from "./store-guard"
 
 export type Mode = "staging" | "mock"
@@ -41,7 +42,7 @@ export type Config = {
   // `{run}` is replaced with the run id.
   customerEmail: string
   adminInboxNote: string | null
-  timeouts: { send: number; webhook: number; human: number; sweep: number }
+  timeouts: { send: number; webhook: number; human: number; sweep: number; crash: number }
   runId: string
 }
 
@@ -147,6 +148,11 @@ const seconds = (env: NodeJS.ProcessEnv, key: string, fallback: number) => {
   return n * 1000
 }
 
+// A send cut off by a restart is retried once its lease (the plugin's retry
+// delay) has passed, by the next sweep: one default sweep interval (5 min)
+// and a margin after that.
+export const CRASH_TIMEOUT_SECONDS = RETRY_DELAY_MS / 1000 + 600
+
 export function loadConfig(args: Args, env: NodeJS.ProcessEnv, now = new Date()): Config {
   const mode: Mode = args.mock ? "mock" : "staging"
   const printTrailUrl = assertPrintTrailTarget(mode, env.PT_STAGING_BASE_URL)
@@ -199,6 +205,7 @@ export function loadConfig(args: Args, env: NodeJS.ProcessEnv, now = new Date())
       webhook: seconds(env, "CHECKLIST_WEBHOOK_TIMEOUT", mode === "mock" ? 30 : 180),
       human: seconds(env, "CHECKLIST_HUMAN_TIMEOUT", 900),
       sweep: seconds(env, "CHECKLIST_SWEEP_TIMEOUT", 420),
+      crash: seconds(env, "CHECKLIST_CRASH_TIMEOUT", CRASH_TIMEOUT_SECONDS),
     },
     runId,
   }
