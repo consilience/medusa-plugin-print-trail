@@ -25,7 +25,7 @@ export function formatPrice(amount: number, currency: string): string {
 
 // The setup the empty state shows: code, not copy.
 export const ENV_SNIPPET = [
-  "PRINT_TRAIL_BASE_URL=https://printtrail-core.consilstaging.com",
+  "PRINT_TRAIL_BASE_URL=https://api.printtrail.com",
   "PRINT_TRAIL_CHANNEL_ID=",
   "PRINT_TRAIL_API_TOKEN=",
   "MEDUSA_BACKEND_URL=https://",
