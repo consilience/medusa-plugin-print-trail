@@ -20,6 +20,9 @@ export type VariantCheckRow = {
   check_note: string | null
   checked_at: Date | string | null
   check_source: string | null
+  // Set by the database layer on every row it reads in full.
+  created_at?: Date | string | null
+  updated_at?: Date | string | null
 }
 
 export type CheckColumns = Pick<

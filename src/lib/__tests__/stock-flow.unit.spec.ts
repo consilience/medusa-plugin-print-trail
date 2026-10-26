@@ -587,6 +587,28 @@ describe("forgetting variants", () => {
     expect(variantRows.rows.map((r) => r.variant_id)).toEqual(["v1"])
   })
 
+  // The run read Print Trail's products when it started: a product that
+  // joined a profile since (a bulk import, say) has rows the run can't tell
+  // from rows outside the profiles.
+  it("a full run leaves a row created or updated since it started for the next full run", async () => {
+    const before = new Date(NOW.getTime() - 60_000)
+    const since = new Date(NOW.getTime() + 1_000)
+    for (const id of ["v_new", "v_updated", "v_old"]) {
+      catalogue.outside.push(variant(id, `NEW-${id}`, { profileId: "sp_default" }))
+      variantRows.add(id, `prod_${id}`, notFound(`NEW-${id}`))
+    }
+    Object.assign(variantRows.get("v_new")!, { created_at: since, updated_at: since })
+    Object.assign(variantRows.get("v_updated")!, { created_at: before, updated_at: since })
+    Object.assign(variantRows.get("v_old")!, { created_at: before, updated_at: before })
+    await runStockSync(ctx, { trigger: "schedule" })
+    expect(variantRows.rows.map((r) => r.variant_id).sort()).toEqual(["v_new", "v_updated"])
+
+    // The next run started after both were written: they go.
+    ctx.now = () => new Date(since.getTime() + 60_000)
+    await runStockSync(ctx, { trigger: "schedule" })
+    expect(variantRows.rows).toEqual([])
+  })
+
   it("a SKU-only run, or a run that isn't trusted (no profiles, no levels), prunes nothing", async () => {
     variantRows.add("v_gone", "prod_v1", notFound("GONE-1"))
     await runStockSync(ctx, { trigger: "shortfall", skus: ["9780000000002"] })

@@ -477,9 +477,15 @@ export const VARIANT_ROW_PAGE = 500
 // variant Medusa no longer has (deleted without an event, as when a product
 // update replaces its variants), or whose product has left Print Trail's
 // profiles, is forgotten, so its SKU leaves the notice. A product that
-// rejoins a profile is checked again when it's saved. A failure is logged;
-// the run still completes.
-export async function pruneVariantRows(ctx: StockContext, ptProducts: Set<string>): Promise<void> {
+// rejoins a profile is checked again when it's saved. The run read the
+// products at its start, so a row created or updated since `startedAt` is
+// left for the next full run: its product may have joined a profile in the
+// meantime (a bulk import, say). A failure is logged; the run still
+// completes.
+export async function pruneVariantRows(ctx: StockContext, ptProducts: Set<string>, startedAt: Date): Promise<void> {
+  const since = startedAt.getTime()
+  const writtenSince = (r: VariantCheckRow) =>
+    [r.created_at, r.updated_at].some((at) => at !== null && at !== undefined && new Date(at).getTime() >= since)
   try {
     let after: string | null = null
     for (;;) {
@@ -487,6 +493,7 @@ export async function pruneVariantRows(ctx: StockContext, ptProducts: Set<string
       if (!rows.length) return
       const live = new Map((await ctx.catalogue.liveVariants(rows.map((r) => r.variant_id))).map((v) => [v.id, v.productId]))
       const gone = rows.filter((r) => {
+        if (writtenSince(r)) return false
         const productId = live.get(r.variant_id)
         return productId === undefined || !ptProducts.has(productId)
       })
@@ -674,7 +681,7 @@ export async function runStockSync(ctx: StockContext, input: StockSyncInput): Pr
       } catch (e) {
         ctx.logger?.warn(`Print Trail stock sync: couldn't read the Print Trail products: ${message(e)}; SKU checks are pruned with the next full sync`)
       }
-      if (ptProducts) await pruneVariantRows(ctx, ptProducts)
+      if (ptProducts) await pruneVariantRows(ctx, ptProducts, new Date(startedAt))
       await refreshStoredChecks(ctx, levels)
       // Last: it writes stock_backordered, which nothing after it in this run
       // writes (only unmatched_skus, the run record and the watermark).
