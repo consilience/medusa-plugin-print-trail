@@ -2,6 +2,7 @@
 # Installs a packed tarball into a new project with Medusa, as a store would,
 # and checks the package from there:
 #   scripts/install-test.sh <tgz> <medusa version>
+# - that the project has that version of Medusa;
 # - its exports (scripts/check-exports.cjs);
 # - its declarations, by type-checking scripts/consumer-fixture with
 #   moduleResolution node16 and bundler.
@@ -26,6 +27,17 @@ cd "$dir"
 npm init -y > /dev/null
 # No --legacy-peer-deps: a peer range a store can't satisfy fails here.
 npm install "$tgz" "@medusajs/framework@$medusa" "@medusajs/medusa@$medusa" typescript@5.9.3 @types/node@20 --no-audit --no-fund
+
+# The project has the Medusa it was asked for. (Read by path: the framework
+# doesn't export its package.json.)
+for package in @medusajs/framework @medusajs/medusa; do
+  installed="$(node -p "require('./node_modules/$package/package.json').version")"
+  if [ "$installed" != "$medusa" ]; then
+    echo "FAIL: $package is $installed, not $medusa" >&2
+    exit 1
+  fi
+  echo "ok: $package $installed"
+done
 
 node "$scripts/check-exports.cjs" "$dir"
 

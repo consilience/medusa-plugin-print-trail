@@ -120,8 +120,6 @@ describe("labels", () => {
   })
 })
 
-// An order only waiting for its pre-order release isn't an
-// orange back-order.
 // "Sync stock now" on the settings page.
 describe("stockSyncToast", () => {
   const STATUSES = ["completed", "deferred", "disabled", "dropped", "failed"] as const
@@ -143,6 +141,8 @@ describe("stockSyncToast", () => {
   })
 })
 
+// An order only waiting for its pre-order release isn't an
+// orange back-order.
 describe("onlyWaitingForRelease", () => {
   const f = (back_order: string | null, status = back_order ? "back-order" : "dispatched") => ({ status, back_order }) as any
   it("is true for a back-order order whose every back-order waits", () => {

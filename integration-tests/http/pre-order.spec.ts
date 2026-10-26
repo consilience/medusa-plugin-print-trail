@@ -417,7 +417,6 @@ medusaIntegrationTestRunner({
       expect(version.version).toBe("1.3.0")
     })
 
-    // 0.1.x on Medusa 2.19+ left a deleted key out of the write, which
     // A store upgraded from 0.2.0 (or 0.1.x): the SKU checks and backorder
     // reasons are still in variant metadata, which store routes return, with
     // no print_trail_variant rows; and 0.1.x on Medusa 2.19+ left a
