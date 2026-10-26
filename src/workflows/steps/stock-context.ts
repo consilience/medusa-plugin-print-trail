@@ -3,14 +3,7 @@ import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { updateInventoryLevelsWorkflow, updateProductVariantsWorkflow } from "@medusajs/medusa/core-flows"
 import { PRINT_TRAIL_PROVIDER_ID } from "../../lib/lines"
 import { resolveSku } from "../../lib/sku"
-import {
-  BACKORDER_MARKER_KEY,
-  backorderMarkerValue,
-  PRE_ORDER_FIELD_KEY,
-  readBackorderMarker,
-  type BackorderReason,
-  type StockVariant,
-} from "../../lib/stock"
+import { LEGACY_BACKORDER_MARKER_KEY, PRE_ORDER_FIELD_KEY, readBackorderMarker, type StockVariant } from "../../lib/stock"
 import { SKU_CHECK_QUEUE_PREFIX } from "../../lib/sku-check-queue"
 import type { MetadataPage, PluginMetadata, StockCatalogue, StockContext } from "../../lib/stock-flow"
 import { installedMetadataUpdateMode, patchVariantMetadata, type VariantMetadataStore } from "../../lib/variant-metadata"
@@ -66,7 +59,6 @@ export function toStockVariants(graphVariants: unknown[], profileByProduct: Map<
             profileId: (v.product_id && profileByProduct.get(v.product_id)) || null,
             manageInventory: v.manage_inventory === true,
             allowBackorder: v.allow_backorder === true,
-            backorderMarker: readBackorderMarker(v.metadata?.[BACKORDER_MARKER_KEY]),
             preOrderField: v.metadata?.[PRE_ORDER_FIELD_KEY],
             inventory: (v.inventory_items ?? []).flatMap((i) =>
               i
@@ -145,14 +137,15 @@ export function buildVariantMetadataStore(container: MedusaContainer): VariantMe
   }
 }
 
-// The marker is true for print-on-demand and "pre-order" for a pre-order
-// product; "" deletes it (src/lib/variant-metadata.ts).
-export function backorderPatches(variantIds: string[], on: boolean, reasonById?: Record<string, BackorderReason>) {
-  return variantIds.map((id) => ({
-    id,
-    metadata: { [BACKORDER_MARKER_KEY]: on ? backorderMarkerValue(reasonById?.[id] ?? "print-on-demand") : "" },
-    fields: { allow_backorder: on },
-  }))
+// updateProductVariantsWorkflow's selector form: allow_backorder alone, so
+// the variant's metadata (and anything else on it) isn't read or written. A
+// deleted variant matches nothing.
+export function backorderUpdates(variantIds: string[], on: boolean) {
+  const updates: { selector: { id: string[] }; update: { allow_backorder: boolean } }[] = []
+  for (let i = 0; i < variantIds.length; i += VARIANT_CHUNK) {
+    updates.push({ selector: { id: variantIds.slice(i, i + VARIANT_CHUNK) }, update: { allow_backorder: on } })
+  }
+  return updates
 }
 
 // print_trail_pre_order: the date, true, or "" to delete it. Skipped when the
@@ -173,8 +166,8 @@ export function preOrderFieldPatches(updates: { id: string; value: string | true
 export function staleMarkerPatches(variantIds: string[]) {
   return variantIds.map((id) => ({
     id,
-    metadata: { [BACKORDER_MARKER_KEY]: "" },
-    when: (current: Record<string, unknown> | null) => current?.[BACKORDER_MARKER_KEY] !== undefined,
+    metadata: { [LEGACY_BACKORDER_MARKER_KEY]: "" },
+    when: (current: Record<string, unknown> | null) => current?.[LEGACY_BACKORDER_MARKER_KEY] !== undefined,
   }))
 }
 
@@ -199,7 +192,7 @@ export async function listPluginMetadata(
   const found: PluginMetadata[] = []
   for (const v of rows) {
     const preOrderField = v.metadata?.[PRE_ORDER_FIELD_KEY]
-    const backorderMarker = readBackorderMarker(v.metadata?.[BACKORDER_MARKER_KEY])
+    const backorderMarker = readBackorderMarker(v.metadata?.[LEGACY_BACKORDER_MARKER_KEY])
     if ((preOrderField !== undefined && preOrderField !== null) || backorderMarker !== null) {
       found.push({ id: v.id, preOrderField, backorderMarker })
     }
@@ -255,12 +248,11 @@ export function buildStockCatalogue(container: MedusaContainer): StockCatalogue 
     async updateLevels(updates) {
       await updateInventoryLevelsWorkflow(container).run({ input: { updates } })
     },
-    // One update per variant, so allow_backorder and the marker never
-    // disagree. Turning it off deletes the marker and keeps the other keys.
-    // The flow only switches off variants in its stock_backordered record.
-    async setBackorder(variantIds, on, reasonById) {
-      for (let i = 0; i < variantIds.length; i += VARIANT_CHUNK) {
-        await patchVariantMetadata(metadata, backorderPatches(variantIds.slice(i, i + VARIANT_CHUNK), on, reasonById))
+    // The flow only switches off variants in its stock_backordered record,
+    // which also keeps why each one is on.
+    async setBackorder(variantIds, on) {
+      for (const input of backorderUpdates(variantIds, on)) {
+        await updateProductVariantsWorkflow(container).run({ input })
       }
     },
     async setPreOrderFields(updates) {

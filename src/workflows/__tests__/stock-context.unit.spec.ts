@@ -1,7 +1,7 @@
 import { MedusaError } from "@medusajs/framework/utils"
 import { isLockBusy } from "../../lib/stock-request"
 import { patchVariantMetadata, type VariantMetadataStore } from "../../lib/variant-metadata"
-import { backorderPatches, listPluginMetadata, preOrderFieldPatches, staleMarkerPatches, toStockVariants } from "../steps/stock-context"
+import { backorderUpdates, listPluginMetadata, preOrderFieldPatches, staleMarkerPatches, toStockVariants } from "../steps/stock-context"
 
 // The shape query.graph returns for STOCK_VARIANT_FIELDS (2.17.2): numeric
 // columns can arrive as strings.
@@ -46,7 +46,6 @@ describe("toStockVariants", () => {
       profileId: "sp_pt",
       manageInventory: true,
       allowBackorder: true,
-      backorderMarker: "print-on-demand",
       inventory: [
         {
           inventoryItemId: "iitem_1",
@@ -58,34 +57,24 @@ describe("toStockVariants", () => {
         },
       ],
     })
-    expect(b).toMatchObject({ id: "variant_2", sku: "OTHER", profileId: null, backorderMarker: null, inventory: [] })
+    expect(b).toMatchObject({ id: "variant_2", sku: "OTHER", profileId: null, inventory: [] })
+    // The legacy marker in metadata isn't read: the reason is in stock_backordered.
+    expect("backorderMarker" in a).toBe(false)
   })
 })
 
-describe("the backorder marker (API 1.3.0)", () => {
-  it("reads both marker values", () => {
-    const of = (value: unknown) =>
-      toStockVariants([{ id: "v", sku: "S", metadata: { print_trail_backorder: value }, inventory_items: [] }], new Map())[0].backorderMarker
-    expect(of(true)).toBe("print-on-demand")
-    expect(of("pre-order")).toBe("pre-order")
-    expect(of("true")).toBeNull()
-    expect(of(undefined)).toBeNull()
-    expect(toStockVariants([{ id: "v", metadata: null }], new Map())[0].backorderMarker).toBeNull()
-  })
-
-  it("writes the pre-order marker", () => {
-    expect(backorderPatches(["v1", "v2"], true, { v1: "pre-order", v2: "print-on-demand" })).toEqual([
-      { id: "v1", metadata: { print_trail_backorder: "pre-order" }, fields: { allow_backorder: true } },
-      { id: "v2", metadata: { print_trail_backorder: true }, fields: { allow_backorder: true } },
+describe("allow_backorder", () => {
+  it("setBackorder sends only allow_backorder, by selector", () => {
+    const ids = Array.from({ length: 150 }, (_, i) => `v${i}`)
+    const updates = backorderUpdates(ids, true)
+    // updateProductVariantsWorkflow's selector form, 100 variants at a time:
+    // no metadata, so nothing else on the variant is written.
+    expect(updates).toEqual([
+      { selector: { id: ids.slice(0, 100) }, update: { allow_backorder: true } },
+      { selector: { id: ids.slice(100) }, update: { allow_backorder: true } },
     ])
-    // No reason given: print-on-demand, as before.
-    expect(backorderPatches(["v3"], true)).toEqual([
-      { id: "v3", metadata: { print_trail_backorder: true }, fields: { allow_backorder: true } },
-    ])
-    // Off deletes either value.
-    expect(backorderPatches(["v1"], false, { v1: "pre-order" })).toEqual([
-      { id: "v1", metadata: { print_trail_backorder: "" }, fields: { allow_backorder: false } },
-    ])
+    expect(backorderUpdates(["v1"], false)).toEqual([{ selector: { id: ["v1"] }, update: { allow_backorder: false } }])
+    expect(backorderUpdates([], true)).toEqual([])
   })
 })
 

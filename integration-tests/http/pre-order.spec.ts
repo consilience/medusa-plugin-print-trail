@@ -68,12 +68,23 @@ medusaIntegrationTestRunner({
         stocked: Number(level?.stocked_quantity),
         reserved: Number(level?.reserved_quantity ?? 0),
         allowBackorder: v.allow_backorder as boolean,
+        // The 0.2.0 backorder marker: since 1.0.0 the reason is kept in
+        // stock_backordered (reasonOf), never here.
         marker: (v.metadata ?? {}).print_trail_backorder as unknown,
         // 0.1.1: the store-facing flag.
         preOrder: (v.metadata ?? {}).print_trail_pre_order as unknown,
         metadata: (v.metadata ?? {}) as Record<string, unknown>,
       }
     }
+
+    // Why the plugin turned the variant's backorder on, from its own record;
+    // undefined when it doesn't track it.
+    const reasonOf = async (variantId: string) => {
+      const record = await printTrail(container()).getState("stock_backordered")
+      return record?.ids?.includes(variantId) ? (record.reasons?.[variantId] as string | undefined) : undefined
+    }
+    // The variant widget's stock block.
+    const viewStock = async (variantId: string) => (await api.get(`/admin/print-trail/variants/${variantId}`, admin)).data.stock
 
     // The per-parcel emails of one order, oldest first.
     const shipmentEmails = async (orderId: string) => {
@@ -180,8 +191,11 @@ medusaIntegrationTestRunner({
     })
 
     it("the stock sync writes the store-facing pre-order flag", async () => {
-      // beforeEach's run: the date, beside the backorder marker.
-      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ preOrder: PRE_ORDER_DATE, marker: "pre-order", allowBackorder: true })
+      // beforeEach's run: the date, and the backorder with its reason in the
+      // plugin's record rather than the variant's metadata.
+      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ preOrder: PRE_ORDER_DATE, marker: undefined, allowBackorder: true })
+      expect(await reasonOf(seed.variants.preOrder)).toBe("pre-order")
+      expect(await viewStock(seed.variants.preOrder)).toMatchObject({ pre_order_backorder: true, print_on_demand: false })
       expect((await variantOf(seed.variants.pt)).preOrder).toBeUndefined()
       // No publication date at Print Trail: true.
       delete mock().state.publicationDate[SKUS.preOrder]
@@ -233,7 +247,8 @@ medusaIntegrationTestRunner({
     })
 
     it("the stock sync keeps a 0-stock pre-order purchasable", async () => {
-      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ stocked: 0, allowBackorder: true, marker: "pre-order" })
+      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ stocked: 0, allowBackorder: true })
+      expect(await reasonOf(seed.variants.preOrder)).toBe("pre-order")
       // A store cart for it completes at 0 stock.
       const { orderId } = await placeOrder(api, seed, [{ variantId: seed.variants.preOrder, quantity: 1 }])
       await rowWhere(orderId, "the confirmed row", (r) => !!r.confirmed_at)
@@ -246,7 +261,8 @@ medusaIntegrationTestRunner({
         const v = await variantOf(seed.variants.preOrder)
         return !v.allowBackorder && v.stocked === 5 ? v : undefined
       }, { what: "backorders off at stock 5" })
-      expect((await variantOf(seed.variants.preOrder)).marker).toBeUndefined()
+      expect(await reasonOf(seed.variants.preOrder)).toBeUndefined()
+      expect(await viewStock(seed.variants.preOrder)).toMatchObject({ pre_order_backorder: false })
     })
 
     it("a limited pre-order's level adds back Medusa's reservation", async () => {
@@ -272,11 +288,12 @@ medusaIntegrationTestRunner({
       const service = printTrail(container())
       await service.setState("stock_backordered", { ids: [] })
       await updateProductVariantsWorkflow(container()).run({
-        input: { product_variants: [{ id: seed.variants.preOrder, allow_backorder: true, metadata: { print_trail_backorder: "" } }] },
+        input: { product_variants: [{ id: seed.variants.preOrder, allow_backorder: true }] },
       })
       await stockJob()
       expect(await variantOf(seed.variants.preOrder)).toMatchObject({ allowBackorder: true })
-      expect((await variantOf(seed.variants.preOrder)).marker).toBeFalsy()
+      expect(await reasonOf(seed.variants.preOrder)).toBeUndefined()
+      expect(await viewStock(seed.variants.preOrder)).toMatchObject({ pre_order_backorder: false, print_on_demand: false })
       // Never claimed, still flagged for the store.
       expect((await variantOf(seed.variants.preOrder)).preOrder).toBe(PRE_ORDER_DATE)
 

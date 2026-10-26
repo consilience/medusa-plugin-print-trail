@@ -14,6 +14,7 @@ import {
   planStockSync,
   STATE_KEYS,
   STOCK_FAILURE_CAP,
+  type Backordered,
   type BackorderReason,
   type PreOrderField,
   type SkipReason,
@@ -44,10 +45,9 @@ export type StockCatalogue = {
   ptProfileIds(): Promise<string[]>
   loadVariants(ptProfileIds: string[]): Promise<StockVariant[]>
   updateLevels(updates: StockPlan["levelUpdates"]): Promise<void>
-  // Writes allow_backorder and the print_trail_backorder marker together:
-  // on writes the reason's marker (print-on-demand when none is given); off
-  // deletes it.
-  setBackorder(variantIds: string[], on: boolean, reasonById?: Record<string, BackorderReason>): Promise<void>
+  // Writes allow_backorder alone (the reason is kept in stock_backordered). A
+  // deleted variant matches nothing.
+  setBackorder(variantIds: string[], on: boolean): Promise<void>
   // Writes metadata.print_trail_pre_order (PRE_ORDER_FIELD_KEY); null deletes
   // it. A variant whose stored value already matches is left alone.
   setPreOrderFields(updates: { id: string; value: PreOrderField | null }[]): Promise<void>
@@ -287,7 +287,7 @@ function resumeScan(stored: Partial<MetadataScan> | null, now: Date): MetadataSc
 // the plugin then forgot the variant, so a variant that has since left the
 // run's scope can't be found from the state rows. Every variant is read once:
 // outside the scope, print_trail_pre_order is deleted, and an untracked
-// variant's backorder marker (inside the scope the plan's staleMarkers do it).
+// variant's backorder marker.
 //
 // The stock lock isn't renewed, so a run reads at most limits.maxPages pages
 // and starts none once it is limits.deadlineMs old, measured from the run's
@@ -366,6 +366,12 @@ export async function pruneVariantRows(ctx: StockContext, ptProducts: Set<string
   }
 }
 
+// stock_backordered as stored: ids sorted, and a reason only for a tracked id.
+function backorderedRecord(tracked: Set<string>, reasons: Record<string, BackorderReason>): Backordered {
+  const ids = [...tracked].sort()
+  return { ids, reasons: Object.fromEntries(ids.filter((id) => reasons[id]).map((id) => [id, reasons[id]])) }
+}
+
 // Under the lock. Returns results; only a state-store error throws.
 export async function runStockSync(ctx: StockContext, input: StockSyncInput): Promise<StockSyncResult> {
   const now = () => (ctx.now ? ctx.now() : new Date())
@@ -433,7 +439,11 @@ export async function runStockSync(ctx: StockContext, input: StockSyncInput): Pr
       return await untrusted("no Print Trail shipping profiles (no shipping option uses the Print Trail provider)")
     }
     const variants = await ctx.catalogue.loadVariants(profiles)
-    const tracked = new Set((await ctx.state.getState<{ ids: string[] }>(STATE_KEYS.backordered))?.ids ?? [])
+    const stored = await ctx.state.getState<Backordered>(STATE_KEYS.backordered)
+    const tracked = new Set(stored?.ids ?? [])
+    // A record from 0.2.0 has no reasons.
+    const reasons: Record<string, BackorderReason> = { ...(stored?.reasons ?? {}) }
+    const saveTracked = () => ctx.state.setState(STATE_KEYS.backordered, backorderedRecord(tracked, reasons))
     plan = planStockSync({
       levels,
       variants,
@@ -463,11 +473,15 @@ export async function runStockSync(ctx: StockContext, input: StockSyncInput): Pr
     for (let i = 0; i < plan.levelUpdates.length; i += LEVEL_CHUNK) {
       await ctx.catalogue.updateLevels(plan.levelUpdates.slice(i, i + LEVEL_CHUNK))
     }
+    // A SKU-only run's plan has only its own variants' reasons, so others
+    // keep theirs.
+    Object.assign(reasons, plan.reasons)
     if (plan.backorderOn.length) {
-      // Tracked before the write, so a variant can't be backordered untracked.
+      // Tracked (with its reason) before the write, so a variant can't be
+      // backordered untracked.
       plan.backorderOn.forEach((id) => tracked.add(id))
-      await ctx.state.setState(STATE_KEYS.backordered, { ids: [...tracked].sort() })
-      await ctx.catalogue.setBackorder(plan.backorderOn, true, plan.backorderReason)
+      await saveTracked()
+      await ctx.catalogue.setBackorder(plan.backorderOn, true)
     }
     // A full run sees every in-scope variant: a tracked one it didn't see has
     // left Print Trail's profiles (or inventory management), so its plugin
@@ -476,9 +490,11 @@ export async function runStockSync(ctx: StockContext, input: StockSyncInput): Pr
     const stale = input.skus ? [] : [...tracked].filter((id) => !inScope.has(id))
     const off = [...plan.backorderOff, ...stale]
     if (off.length) await ctx.catalogue.setBackorder(off, false)
-    off.forEach((id) => tracked.delete(id))
-    await ctx.state.setState(STATE_KEYS.backordered, { ids: [...tracked].sort() })
-    if (plan.staleMarkers.length) await ctx.catalogue.clearBackorderMarkers(plan.staleMarkers)
+    off.forEach((id) => {
+      tracked.delete(id)
+      delete reasons[id]
+    })
+    await saveTracked()
     if (plan.preOrderFields) {
       await writePreOrderFields(ctx, plan, inScope, !input.skus)
     }

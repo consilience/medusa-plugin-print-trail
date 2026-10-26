@@ -35,12 +35,16 @@ class MemoryState implements StateStore {
   }
 }
 
+// A variant as the fake stores it: what loadVariants returns, plus the
+// legacy backorder marker in its metadata (only the metadata scan reads it).
+type FakeVariant = StockVariant & { backorderMarker: BackorderReason | null }
+
 class FakeCatalogue implements StockCatalogue {
   calls: { method: string; args: unknown[] }[] = []
   // Variants that left Print Trail's profiles: never loaded, still writable.
-  outside: StockVariant[] = []
+  outside: FakeVariant[] = []
   private failing = new Set<string>()
-  constructor(public variants: StockVariant[], public profiles = [PT]) {}
+  constructor(public variants: FakeVariant[], public profiles = [PT]) {}
   failNext(method: keyof StockCatalogue) {
     this.failing.add(method)
   }
@@ -54,7 +58,7 @@ class FakeCatalogue implements StockCatalogue {
   }
   async loadVariants(ids: string[]) {
     this.check("loadVariants", [ids])
-    return JSON.parse(JSON.stringify(this.variants)) as StockVariant[]
+    return JSON.parse(JSON.stringify(this.variants.map(({ backorderMarker: _marker, ...v }) => v))) as StockVariant[]
   }
   async updateLevels(updates: StockPlan["levelUpdates"]) {
     this.check("updateLevels", [updates])
@@ -67,17 +71,11 @@ class FakeCatalogue implements StockCatalogue {
       }
     }
   }
-  // The reasons each "on" call wrote, apart from calls (so [ids, on] stays
-  // comparable).
-  reasons: Record<string, BackorderReason>[] = []
-  async setBackorder(ids: string[], on: boolean, reasonById?: Record<string, BackorderReason>) {
+  // allow_backorder alone: the variant's metadata isn't written.
+  async setBackorder(ids: string[], on: boolean) {
     this.check("setBackorder", [ids, on])
-    if (on) this.reasons.push(reasonById ?? {})
     for (const v of [...this.variants, ...this.outside]) {
-      if (ids.includes(v.id)) {
-        v.allowBackorder = on
-        v.backorderMarker = on ? (reasonById?.[v.id] ?? "print-on-demand") : null
-      }
+      if (ids.includes(v.id)) v.allowBackorder = on
     }
   }
   async setPreOrderFields(updates: { id: string; value: string | true | null }[]) {
@@ -200,7 +198,7 @@ class MemoryVariantRows {
   }
 }
 
-const variant = (id: string, sku: string, over: Partial<StockVariant> = {}): StockVariant => ({
+const variant = (id: string, sku: string, over: Partial<FakeVariant> = {}): FakeVariant => ({
   id,
   sku,
   profileId: PT,
@@ -287,13 +285,15 @@ describe("runStockSync", () => {
   it("handles print-on-demand: stock 3, backorder on, then off when it ends", async () => {
     await runStockSync(ctx, { trigger: "schedule" })
     expect(catalogue.level("v3")).toBe(3)
-    expect(catalogue.get("v3")).toMatchObject({ allowBackorder: true, backorderMarker: "print-on-demand" })
+    expect(catalogue.get("v3")).toMatchObject({ allowBackorder: true })
     expect(catalogue.calls).toContainEqual({ method: "setBackorder", args: [["v3"], true] })
+    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3"], reasons: { v3: "print-on-demand" } })
 
     mock.state.stock["9780000000026"] = 4
     await runStockSync(ctx, { trigger: "schedule" })
     expect(catalogue.level("v3")).toBe(4)
-    expect(catalogue.get("v3")).toMatchObject({ allowBackorder: false, backorderMarker: null })
+    expect(catalogue.get("v3")).toMatchObject({ allowBackorder: false })
+    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: [], reasons: {} })
     expect(catalogue.calls).toContainEqual({ method: "setBackorder", args: [["v3"], false] })
   })
 
@@ -410,15 +410,15 @@ describe("pending requests", () => {
 describe("backorders that leave scope", () => {
   it("turns off a plugin backorder on a variant that leaves Print Trail's profiles", async () => {
     await runStockSync(ctx, { trigger: "schedule" })
-    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3"] })
+    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3"], reasons: { v3: "print-on-demand" } })
     // The product moves to the default profile (or the option is deleted).
     const v3 = catalogue.variants.splice(2, 1)[0]
     catalogue.outside.push(v3)
     catalogue.calls = []
     await runStockSync(ctx, { trigger: "schedule" })
     expect(catalogue.calls).toContainEqual({ method: "setBackorder", args: [["v3"], false] })
-    expect(v3).toMatchObject({ allowBackorder: false, backorderMarker: null })
-    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: [] })
+    expect(v3).toMatchObject({ allowBackorder: false })
+    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: [], reasons: {} })
   })
 
   it("keeps tracking on a SKU-only run and never touches a merchant's backorder", async () => {
@@ -426,9 +426,9 @@ describe("backorders that leave scope", () => {
     catalogue.calls = []
     await runStockSync(ctx, { trigger: "shortfall", skus: ["9780000000019"] })
     expect(catalogue.writes().filter((c) => c.method === "setBackorder")).toEqual([])
-    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3"] })
+    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3"], reasons: { v3: "print-on-demand" } })
 
-    // The merchant's own backorder (untracked, even with a marker) leaving scope.
+    // The merchant's own backorder (untracked, even with a legacy marker) leaving scope.
     const own = variant("v9", "9780000000002", { allowBackorder: true, backorderMarker: "print-on-demand" })
     catalogue.outside.push(own)
     await runStockSync(ctx, { trigger: "schedule" })
@@ -441,7 +441,55 @@ describe("backorders that leave scope", () => {
     mock.state.stock["9780000000026"] = 2
     await runStockSync(ctx, { trigger: "schedule" })
     expect(catalogue.get("v3").allowBackorder).toBe(false)
-    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: [] })
+    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: [], reasons: {} })
+  })
+
+  it("a deleted tracked variant is untracked without an error", async () => {
+    await state.setState(STATE_KEYS.backordered, { ids: ["v3", "v_deleted"], reasons: { v3: "print-on-demand", v_deleted: "pre-order" } })
+    const result = await runStockSync(ctx, { trigger: "schedule" })
+    expect(result.status).toBe("completed")
+    // The selector update matches nothing for it.
+    expect(catalogue.calls).toContainEqual({ method: "setBackorder", args: [["v_deleted"], false] })
+    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3"], reasons: { v3: "print-on-demand" } })
+  })
+})
+
+// stock_backordered: { ids, reasons }. ids decide what the plugin may switch
+// off; reasons say why each is on, for display.
+describe("the backorder record", () => {
+  const record = () => state.values.get(STATE_KEYS.backordered)
+
+  it("the reason is recorded before the on-write", async () => {
+    catalogue.failNext("setBackorder")
+    const result = await runStockSync(ctx, { trigger: "schedule" })
+    expect(result).toEqual({ status: "failed", error: "setBackorder broke" })
+    expect(record()).toEqual({ ids: ["v3"], reasons: { v3: "print-on-demand" } })
+  })
+
+  it("an off-write removes the id and its reason", async () => {
+    catalogue.get("v1").allowBackorder = true
+    catalogue.get("v3").allowBackorder = true
+    await state.setState(STATE_KEYS.backordered, { ids: ["v1", "v3"], reasons: { v1: "pre-order", v3: "print-on-demand" } })
+    await runStockSync(ctx, { trigger: "schedule" })
+    expect(catalogue.calls).toContainEqual({ method: "setBackorder", args: [["v1"], false] })
+    expect(record()).toEqual({ ids: ["v3"], reasons: { v3: "print-on-demand" } })
+  })
+
+  it("a SKU-only run keeps other variants' reasons", async () => {
+    catalogue.get("v3").allowBackorder = true
+    await state.setState(STATE_KEYS.backordered, { ids: ["v3", "v_other"], reasons: { v3: "pre-order", v_other: "pre-order" } })
+    await runStockSync(ctx, { trigger: "shortfall", skus: ["9780000000026"] })
+    // v3's reason changes in the record only: no write.
+    expect(catalogue.calls.filter((c) => c.method === "setBackorder")).toEqual([])
+    expect(record()).toEqual({ ids: ["v3", "v_other"], reasons: { v3: "print-on-demand", v_other: "pre-order" } })
+  })
+
+  it("a 0.2.0 record without reasons is read", async () => {
+    catalogue.get("v3").allowBackorder = true
+    await state.setState(STATE_KEYS.backordered, { ids: ["v3"] })
+    await runStockSync(ctx, { trigger: "schedule" })
+    expect(catalogue.calls.filter((c) => c.method === "setBackorder")).toEqual([])
+    expect(record()).toEqual({ ids: ["v3"], reasons: { v3: "print-on-demand" } })
   })
 })
 
@@ -455,7 +503,7 @@ describe("runs that can't be trusted", () => {
     expect(catalogue.writes().filter((c) => c.args[1] === false)).toEqual([])
     const after = new Map(state.values)
     expect(after.get(STATE_KEYS.unmatched)).toEqual(new Map(JSON.parse(before)).get(STATE_KEYS.unmatched))
-    expect(after.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3"] })
+    expect(after.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3"], reasons: { v3: "print-on-demand" } })
     expect(after.get(STATE_KEYS.lastRun)).toMatchObject({ error: expect.any(String) })
     expect(warnings.join("\n")).toMatch(/no Print Trail shipping profiles/i)
   })
@@ -669,9 +717,8 @@ describe("pre-order stock", () => {
 
   it("tracks pre-order backorders in stock_backordered", async () => {
     await runStockSync(ctx, { trigger: "schedule" })
-    expect(catalogue.get("v5")).toMatchObject({ allowBackorder: true, backorderMarker: "pre-order" })
-    expect((state.values.get(STATE_KEYS.backordered) as { ids: string[] }).ids).toEqual(["v3", "v5"])
-    expect(catalogue.reasons).toEqual([{ v3: "print-on-demand", v5: "pre-order" }])
+    expect(catalogue.get("v5")).toMatchObject({ allowBackorder: true, backorderMarker: null })
+    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3", "v5"], reasons: { v3: "print-on-demand", v5: "pre-order" } })
   })
 
   it("a stock webhook after going active turns the backorder off", async () => {
@@ -680,9 +727,9 @@ describe("pre-order stock", () => {
     mock.state.skuStatus[P] = "active"
     const result = await runStockSync(ctx, { trigger: "webhook", changedAt: "2026-10-19T12:05:00Z" })
     expect(result.status).toBe("completed")
-    expect(catalogue.get("v5")).toMatchObject({ allowBackorder: false, backorderMarker: null })
+    expect(catalogue.get("v5")).toMatchObject({ allowBackorder: false })
     expect(catalogue.level("v5")).toBe(5)
-    expect((state.values.get(STATE_KEYS.backordered) as { ids: string[] }).ids).toEqual(["v3"])
+    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3"], reasons: { v3: "print-on-demand" } })
   })
 
   it("records pre-order SKUs and dates; a SKU-only run merges", async () => {
@@ -822,41 +869,12 @@ describe("stale keys from 0.1.x on Medusa 2.19+", () => {
     mock.state.publicationDate[P] = "2026-12-01"
   })
 
-  it("deletes an untracked variant's backorder marker, leaving its backorder flag", async () => {
-    // v1 was print-on-demand; v2's pre-order went live. Both switched off and
-    // untracked, markers kept. v4 is the store's own backorder (on, untracked).
-    catalogue.get("v1").backorderMarker = "print-on-demand"
-    catalogue.get("v2").backorderMarker = "pre-order"
-    Object.assign(catalogue.get("v4"), { allowBackorder: true, backorderMarker: "print-on-demand" })
-    const result = await runStockSync(ctx, { trigger: "schedule" })
-    expect((result as { plan: StockPlan }).plan.staleMarkers).toEqual(["v1", "v2", "v4"])
-    expect(catalogue.calls).toContainEqual({ method: "clearBackorderMarkers", args: [["v1", "v2", "v4"]] })
-    expect(catalogue.get("v1")).toMatchObject({ allowBackorder: false, backorderMarker: null })
-    expect(catalogue.get("v2")).toMatchObject({ allowBackorder: false, backorderMarker: null })
-    expect(catalogue.get("v4")).toMatchObject({ allowBackorder: true, backorderMarker: null })
-    // v3 (print-on-demand now) is turned on and tracked, its marker kept.
-    expect(catalogue.get("v3")).toMatchObject({ allowBackorder: true, backorderMarker: "print-on-demand" })
-    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3"] })
-    catalogue.calls = []
-    await runStockSync(ctx, { trigger: "schedule" })
-    expect(catalogue.calls.filter((c) => c.method === "clearBackorderMarkers")).toEqual([])
-  })
-
-  it("re-marks an untracked variant it turns on, rather than clearing it", async () => {
+  it("turns on an untracked variant with a stale marker, and records its reason", async () => {
     // A stale "pre-order" marker on a variant that is on pre-order again.
     catalogue.variants.push(variant("v5", P, { backorderMarker: "pre-order" }))
-    const result = await runStockSync(ctx, { trigger: "schedule" })
-    expect((result as { plan: StockPlan }).plan.staleMarkers).toEqual([])
-    expect(catalogue.get("v5")).toMatchObject({ allowBackorder: true, backorderMarker: "pre-order" })
-    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3", "v5"] })
-  })
-
-  it("a SKU-only run clears only its own SKUs' markers", async () => {
-    catalogue.get("v1").backorderMarker = "print-on-demand"
-    catalogue.get("v2").backorderMarker = "pre-order"
-    await runStockSync(ctx, { trigger: "shortfall", skus: ["9780000000019"] })
-    expect(catalogue.get("v1").backorderMarker).toBe("print-on-demand")
-    expect(catalogue.get("v2").backorderMarker).toBeNull()
+    await runStockSync(ctx, { trigger: "schedule" })
+    expect(catalogue.get("v5")).toMatchObject({ allowBackorder: true })
+    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3", "v5"], reasons: { v3: "print-on-demand", v5: "pre-order" } })
   })
 
   it("deletes a stale pre-order flag in scope, on the first run", async () => {

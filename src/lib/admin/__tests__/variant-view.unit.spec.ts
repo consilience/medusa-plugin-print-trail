@@ -18,16 +18,16 @@ describe("variant view", () => {
   it("resolves the override and reports print on demand", () => {
     const v = toVariantView(
       {
+        id: "variant_1",
         sku: "TEE-1",
         manage_inventory: true,
         allow_backorder: true,
         metadata: {
           print_trail_sku: " PT-1 ",
-          print_trail_backorder: true,
           print_trail_sku_check: { sku: "PT-1", status: "matched", checked_at: "t" },
         },
       },
-      { inPtProfile: true, available: 3 }
+      { inPtProfile: true, available: 3, backordered: { ids: ["variant_1"], reasons: { variant_1: "print-on-demand" } } }
     )
     expect(v).toEqual({
       in_print_trail_profile: true,
@@ -76,14 +76,52 @@ describe("variant view", () => {
     })
   })
 
-  it("treats a string backorder marker as not print on demand", () => {
-    const v = toVariantView({ sku: "A", allow_backorder: true, metadata: { print_trail_backorder: "true" } }, { inPtProfile: true, available: 0 })
-    expect(v.stock.print_on_demand).toBe(false)
-  })
-
   it("reads a numeric override as its digits", () => {
     const v = toVariantView({ sku: "A", metadata: { print_trail_sku: 9780000000026 } }, { inPtProfile: true, available: 0 })
     expect(v.override).toBe("9780000000026")
+  })
+})
+
+// Why the plugin's backorder is on comes from stock_backordered, not the
+// variant's metadata.
+describe("the backorder reason", () => {
+  const view = (metadata: Record<string, unknown> | null, backordered?: { ids: string[]; reasons?: Record<string, "print-on-demand" | "pre-order"> } | null) =>
+    toVariantView({ id: "variant_1", sku: "A", allow_backorder: true, metadata }, { inPtProfile: true, available: 0, backordered }).stock
+
+  it("tracked with a reason", () => {
+    // The record's reason wins over a legacy marker that says otherwise.
+    expect(view({ print_trail_backorder: true }, { ids: ["variant_1"], reasons: { variant_1: "pre-order" } })).toMatchObject({
+      print_on_demand: false,
+      pre_order_backorder: true,
+    })
+    expect(view(null, { ids: ["variant_1"], reasons: { variant_1: "print-on-demand" } })).toMatchObject({
+      print_on_demand: true,
+      pre_order_backorder: false,
+    })
+  })
+
+  it("tracked without one: the legacy marker, then print on demand", () => {
+    // A 0.2.0 record has no reasons.
+    expect(view({ print_trail_backorder: "pre-order" }, { ids: ["variant_1"] })).toMatchObject({ print_on_demand: false, pre_order_backorder: true })
+    expect(view({ print_trail_backorder: true }, { ids: ["variant_1"], reasons: {} })).toMatchObject({ print_on_demand: true, pre_order_backorder: false })
+    // No marker, or one that isn't the plugin's: what a tracked id meant before pre-orders.
+    expect(view(null, { ids: ["variant_1"] })).toMatchObject({ print_on_demand: true, pre_order_backorder: false })
+    expect(view({ print_trail_backorder: "true" }, { ids: ["variant_1"] })).toMatchObject({ print_on_demand: true, pre_order_backorder: false })
+  })
+
+  it("untracked with a stale marker shows nothing", () => {
+    for (const marker of [true, "pre-order"]) {
+      expect(view({ print_trail_backorder: marker }, { ids: ["variant_2"], reasons: { variant_2: "print-on-demand" } })).toMatchObject({
+        print_on_demand: false,
+        pre_order_backorder: false,
+      })
+      expect(view({ print_trail_backorder: marker }, null)).toMatchObject({ print_on_demand: false, pre_order_backorder: false })
+    }
+    // A variant without an id is never tracked.
+    expect(
+      toVariantView({ sku: "A", metadata: { print_trail_backorder: true } }, { inPtProfile: true, available: 0, backordered: { ids: [""] } }).stock
+        .print_on_demand
+    ).toBe(false)
   })
 })
 
@@ -93,8 +131,13 @@ describe("pre-order variants", () => {
 
   it("pre-order from the stock sync, with its date", () => {
     const v = toVariantView(
-      { sku: "A", manage_inventory: true, allow_backorder: true, metadata: { print_trail_backorder: "pre-order", ...check("matched") } },
-      { inPtProfile: true, available: 0, preOrder: { publicationDate: "2026-12-01", limit: null, remaining: null } }
+      { id: "variant_1", sku: "A", manage_inventory: true, allow_backorder: true, metadata: check("matched") },
+      {
+        inPtProfile: true,
+        available: 0,
+        preOrder: { publicationDate: "2026-12-01", limit: null, remaining: null },
+        backordered: { ids: ["variant_1"], reasons: { variant_1: "pre-order" } },
+      }
     )
     expect(v.stock).toEqual({
       manage_inventory: true,
@@ -120,9 +163,12 @@ describe("pre-order variants", () => {
   })
 
   it("a pre-order backorder isn't print on demand", () => {
-    const v = toVariantView({ sku: "A", allow_backorder: true, metadata: { print_trail_backorder: "pre-order" } }, { inPtProfile: true, available: 0 })
-    expect(v.stock).toMatchObject({ print_on_demand: false, pre_order_backorder: true })
-    const pod = toVariantView({ sku: "A", allow_backorder: true, metadata: { print_trail_backorder: true } }, { inPtProfile: true, available: 0 })
-    expect(pod.stock).toMatchObject({ print_on_demand: true, pre_order_backorder: false, pre_order: false })
+    const at = (reason: "print-on-demand" | "pre-order") =>
+      toVariantView(
+        { id: "variant_1", sku: "A", allow_backorder: true, metadata: null },
+        { inPtProfile: true, available: 0, backordered: { ids: ["variant_1"], reasons: { variant_1: reason } } }
+      ).stock
+    expect(at("pre-order")).toMatchObject({ print_on_demand: false, pre_order_backorder: true })
+    expect(at("print-on-demand")).toMatchObject({ print_on_demand: true, pre_order_backorder: false, pre_order: false })
   })
 })
