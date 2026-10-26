@@ -72,7 +72,7 @@ scripts/install-test.sh medusa-plugin-print-trail-<version>.tgz 2.22.1
 npm run checklist:staging -- --list                 # the scenarios
 npm run checklist:staging                           # staging; prompts when a person is needed
 npm run checklist:staging -- --non-interactive      # staging; steps that need a person are "manual"
-npm run checklist:staging -- --only send,dispatch   # some scenarios (or --skip)
+npm run checklist:staging -- --only send,cancel     # some scenarios (or --skip)
 npm run checklist:staging -- --mock                 # the bundled mock, unattended
 npm run checklist:staging -- --include preorder-release   # also the opt-in release scenario
 npm run checklist:staging -- --cleanup <run id>     # cancel what an earlier run left behind

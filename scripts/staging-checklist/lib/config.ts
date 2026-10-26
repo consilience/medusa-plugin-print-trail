@@ -45,7 +45,7 @@ export type Config = {
   // CHECKLIST_STAGING_DISPATCH: someone can dispatch with tracking on this
   // Print Trail (a warehouse). Off, staging skips the scenarios that need it.
   stagingDispatch: boolean
-  timeouts: { send: number; webhook: number; human: number; sweep: number; crash: number }
+  timeouts: { send: number; webhook: number; human: number; crash: number }
   runId: string
 }
 
@@ -216,7 +216,6 @@ export function loadConfig(args: Args, env: NodeJS.ProcessEnv, now = new Date())
       send: seconds(env, "CHECKLIST_SEND_TIMEOUT", 90),
       webhook: seconds(env, "CHECKLIST_WEBHOOK_TIMEOUT", mode === "mock" ? 30 : 180),
       human: seconds(env, "CHECKLIST_HUMAN_TIMEOUT", 900),
-      sweep: seconds(env, "CHECKLIST_SWEEP_TIMEOUT", 420),
       crash: seconds(env, "CHECKLIST_CRASH_TIMEOUT", CRASH_TIMEOUT_SECONDS),
     },
     runId,
