@@ -14,6 +14,16 @@ import {
   versionAtLeast,
 } from "../lib/config"
 import { parseForbiddenStores } from "../lib/store-guard"
+import * as changes from "../scenarios/changes"
+import type { Ctx, Scenario } from "../scenarios/common"
+import * as orders from "../scenarios/orders"
+import * as preOrder from "../scenarios/pre-order"
+import * as setup from "../scenarios/setup"
+
+// Every scenario the scenario files export.
+const SCENARIOS = Object.values({ ...setup, ...orders, ...changes, ...preOrder }).filter(
+  (s): s is Scenario => typeof s === "object" && s !== null && "id" in s && "run" in s
+)
 
 const FAKE_TOKEN = "fake-tkn"
 const FAKE_PASSWORD = "fake-pw"
@@ -96,6 +106,38 @@ describe("staging checklist config", () => {
     for (const bad of ["soon", "0", "-60"]) {
       expect(() => loadConfig(parseArgs([]), env({ CHECKLIST_CRASH_TIMEOUT: bad }))).toThrow(/CHECKLIST_CRASH_TIMEOUT must be a number of seconds/)
     }
+  })
+
+  it("reads CHECKLIST_STAGING_DISPATCH as a switch, off by default", () => {
+    const dispatch = (value: string | undefined) => loadConfig(parseArgs([]), env({ CHECKLIST_STAGING_DISPATCH: value })).stagingDispatch
+    expect(dispatch(undefined)).toBe(false)
+    for (const on of ["1", "true", "TRUE", " True "]) expect(dispatch(on)).toBe(true)
+    for (const off of ["", " ", "0", "false", "False"]) expect(dispatch(off)).toBe(false)
+    for (const bad of ["yes", "on", "2", "ture"]) {
+      expect(() => dispatch(bad)).toThrow(/CHECKLIST_STAGING_DISPATCH must be 1 or true \(on\), or 0 or false \(off\)/)
+    }
+  })
+
+  it("skips the scenarios that need a dispatch against staging unless CHECKLIST_STAGING_DISPATCH is set, never with --mock", () => {
+    const variant = { id: "variant_1", productId: "prod_1", sku: "SKU-1" }
+    const ctxFor = (args: string[], over: Record<string, string> = {}) =>
+      ({
+        config: loadConfig(parseArgs(args), env({ PT_SECOND_SKU: "SKU-2", PT_PREORDER_SKU: "SKU-3", PT_PREORDER_LIMITED_SKU: "SKU-4", ...over })),
+        variants: { stocked: variant, second: variant, preOrderUnlimited: variant, preOrderLimited: variant },
+        preOrder: { supported: true, why: "" },
+      }) as unknown as Ctx
+    const skipped = (ctx: Ctx) => SCENARIOS.filter((s) => s.needs?.(ctx)).map((s) => s.id)
+
+    expect(SCENARIOS.length).toBeGreaterThanOrEqual(18)
+    const staging = ctxFor([])
+    expect(skipped(staging).sort()).toEqual(["cancel-too-late", "dispatch", "preorder-mixed", "two-parcel"])
+    for (const id of skipped(staging)) {
+      expect(SCENARIOS.find((s) => s.id === id)!.needs!(staging)).toMatch(/warehouse.*--mock covers this scenario.*CHECKLIST_STAGING_DISPATCH=1/)
+    }
+    expect(skipped(ctxFor([], { CHECKLIST_STAGING_DISPATCH: "1" }))).toEqual([])
+    expect(skipped(ctxFor(["--mock"], { PT_STAGING_BASE_URL: "http://127.0.0.1:4011" }))).toEqual([])
+    // The switch changes nothing in mock mode.
+    expect(skipped(ctxFor(["--mock"], { PT_STAGING_BASE_URL: "http://127.0.0.1:4011", CHECKLIST_STAGING_DISPATCH: "0" }))).toEqual([])
   })
 
   it("redacts secrets and bearer tokens", () => {

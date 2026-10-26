@@ -93,6 +93,14 @@ export async function needsPerson(t: T, what: string): Promise<void> {
   await t.check(what, async () => manual(`needs a person: ${what} (run without --non-interactive)`))
 }
 
+// Only a warehouse dispatches with tracking; the Print Trail staging app
+// can't. Against staging, a scenario that needs a dispatch is skipped (before
+// it places any order) unless CHECKLIST_STAGING_DISPATCH is set.
+export const needsDispatch = (ctx: Pick<Ctx, "config">): string | null =>
+  ctx.config.mode === "staging" && !ctx.config.stagingDispatch
+    ? "dispatching needs a warehouse, not the Print Trail app; --mock covers this scenario. Set CHECKLIST_STAGING_DISPATCH=1 when someone can dispatch on this Print Trail"
+    : null
+
 // Places an order through the store and records it before anything else.
 export async function placeOrder(ctx: Ctx, lines: { variantId: string; quantity: number }[]) {
   if (ctx.aborted) fail("aborted")

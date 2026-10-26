@@ -1,7 +1,7 @@
 // Changes after the order is sent: cancel, edit, refund, resend, recovery.
 import { HttpError, type Medusa } from "../lib/medusa"
 import { ask, expect, fail, humanConfirm, manual, skip, waitFor } from "../lib/runner"
-import { emailsFor, emailTemplate, firstRow, needsPerson, placeAndConfirm, placeOrder, sharedOrder, waitForRow, type Scenario, type T } from "./common"
+import { emailsFor, emailTemplate, firstRow, needsDispatch, needsPerson, placeAndConfirm, placeOrder, sharedOrder, waitForRow, type Scenario, type T } from "./common"
 
 const CANCEL_FAILED = new Set(["refused", "too-late", "failed", "not-sent"])
 
@@ -40,7 +40,7 @@ export const cancel: Scenario = {
 export const cancelTooLate: Scenario = {
   id: "cancel-too-late",
   title: "Cancel too late: timeline note, attention and admin email",
-  needs: needsStocked,
+  needs: (ctx) => needsDispatch(ctx) ?? needsStocked(ctx),
   run: async (t) => {
     const { ctx } = t
     await needsPerson(t, "dispatch at Print Trail")
