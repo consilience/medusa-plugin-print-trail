@@ -41,4 +41,18 @@ describe("the public API", () => {
       default: "./.medusa/server/src/admin/index.js",
     })
   })
+
+  it("each public entry has its declaration file, listed before the code", () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "../../package.json"), "utf8"))
+    const typed = ["./config", "./workflows", "./modules/printTrail", "./providers/print-trail", "./stock", "./shipping-options"]
+    for (const key of typed) {
+      const entry = pkg.exports[key]
+      expect(Object.keys(entry)).toEqual(["types", "default"])
+      expect(entry.types).toBe(entry.default.replace(/\.js$/, ".d.ts"))
+    }
+    // Only Medusa's loader uses the module's path, and the admin build has no declarations.
+    expect(typeof pkg.exports["./.medusa/server/src/modules/printTrail"]).toBe("string")
+    expect(pkg.exports["./admin"]).not.toHaveProperty("types")
+    expect(pkg).not.toHaveProperty("typesVersions")
+  })
 })

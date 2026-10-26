@@ -23,12 +23,30 @@
   "exports": {
     "./package.json": "./package.json",
     "./.medusa/server/src/modules/printTrail": "./.medusa/server/src/modules/printTrail/index.js",
-    "./config": "./.medusa/server/src/config.js",
-    "./workflows": "./.medusa/server/src/workflows/index.js",
-    "./modules/printTrail": "./.medusa/server/src/modules/printTrail/index.js",
-    "./providers/print-trail": "./.medusa/server/src/providers/print-trail/index.js",
-    "./stock": "./.medusa/server/src/stock.js",
-    "./shipping-options": "./.medusa/server/src/shipping-options.js",
+    "./config": {
+      "types": "./.medusa/server/src/config.d.ts",
+      "default": "./.medusa/server/src/config.js"
+    },
+    "./workflows": {
+      "types": "./.medusa/server/src/workflows/index.d.ts",
+      "default": "./.medusa/server/src/workflows/index.js"
+    },
+    "./modules/printTrail": {
+      "types": "./.medusa/server/src/modules/printTrail/index.d.ts",
+      "default": "./.medusa/server/src/modules/printTrail/index.js"
+    },
+    "./providers/print-trail": {
+      "types": "./.medusa/server/src/providers/print-trail/index.d.ts",
+      "default": "./.medusa/server/src/providers/print-trail/index.js"
+    },
+    "./stock": {
+      "types": "./.medusa/server/src/stock.d.ts",
+      "default": "./.medusa/server/src/stock.js"
+    },
+    "./shipping-options": {
+      "types": "./.medusa/server/src/shipping-options.d.ts",
+      "default": "./.medusa/server/src/shipping-options.js"
+    },
     "./admin": {
       "import": "./.medusa/server/src/admin/index.mjs",
       "require": "./.medusa/server/src/admin/index.js",

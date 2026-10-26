@@ -6,6 +6,7 @@ import {
   transform,
   when,
   WorkflowResponse,
+  type WorkflowData,
 } from "@medusajs/framework/workflows-sdk"
 import type { GraphOrder, SelectedLine } from "../lib/lines"
 import { scopedLines } from "../lib/order-scope"
@@ -102,7 +103,9 @@ export const sendOrderToPrintTrailWorkflow = createWorkflow(
       order: loaded.order,
       sequence: scoped.sequence,
       source_ref: scoped.source_ref,
-      payload: transform({ prepared }, ({ prepared }) => (prepared.prepared?.ok ? prepared.prepared.payload : null)),
+      // Typed, so the workflow's declaration names @medusajs/framework rather
+      // than @medusajs/orchestration, which a store may not have.
+      payload: transform({ prepared }, ({ prepared }) => (prepared.prepared?.ok ? prepared.prepared.payload : null)) as WorkflowData<PtCreateOrderRequest | null>,
     })
 
     const create = createPrintTrailDraftStep({

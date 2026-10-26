@@ -2,13 +2,15 @@
 // Checks what `npm pack` would ship: no tests, no mock, no integration tests,
 // staging checklist or CONTRIBUTING.md, every `exports` target present, the
 // README, changelog and licence included, no comments in the compiled server
-// code, no binary file in the server code, and no internal references in any
-// packed file's name or text (scripts/deny-terms.mjs: the generic patterns and
-// the maintainers' private term list, without which the check fails).
-// Run after `npm run build`. The checks on file contents are exported, so they
-// can be tried on a planted file without a build.
+// code or its declarations, no declaration naming a package that isn't a peer
+// or dependency, no binary file in the server code, and no internal references
+// in any packed file's name or text (scripts/deny-terms.mjs: the generic
+// patterns and the maintainers' private term list, without which the check
+// fails). Run after `npm run build`. The checks on file contents are exported,
+// so they can be tried on a planted file without a build.
 import { execFileSync } from "node:child_process"
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
+import { builtinModules } from "node:module"
 import { join, relative } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import ts from "typescript"
@@ -20,16 +22,21 @@ export { internalReferences, isText }
 // today: the build emits only JavaScript.
 const allowedBinaries = new Map()
 
-// The comments in a compiled JavaScript file, as { line, text }, except the
-// source map URL. They are found by parsing, not by line: every comment sits
-// in the trivia before some token, so the leading and trailing comment ranges
-// at each node's and each token's edges are all of them, while a string,
-// template literal or regular expression that holds `//` or `/*` is a single
-// token and never read as trivia. The server build emits no /* @__PURE__ */
-// annotations (only the admin bundle has them), so none is allowed.
+// A compiled file is parsed as TypeScript when it is a declaration file.
+const scriptKind = (fileName) => (/\.d\.[cm]?ts$/.test(fileName) ? ts.ScriptKind.TS : ts.ScriptKind.JS)
+
+// The comments in a compiled JavaScript or declaration file, as { line, text },
+// except the source map URL. They are found by parsing, not by line: every
+// comment sits in the trivia before some token, so the leading and trailing
+// comment ranges at each node's and each token's edges are all of them, while
+// a string, template literal or regular expression that holds `//` or `/*` is
+// a single token and never read as trivia. The server build emits no
+// /* @__PURE__ */ annotations (only the admin bundle has them), so none is
+// allowed. Nor is a triple-slash directive in a declaration file: a
+// `/// <reference types>` would make every store install that package's types.
 const allowedComment = /^\/\/[#@] sourceMappingURL=/
 export function commentsIn(text, fileName = "file.js") {
-  const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+  const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, scriptKind(fileName))
   const ranges = new Map()
   const collect = (pos) => {
     for (const range of ts.getLeadingCommentRanges(text, pos) ?? []) ranges.set(range.pos, range)
@@ -50,6 +57,54 @@ export function commentsIn(text, fileName = "file.js") {
       text: text.slice(range.pos, range.end),
     }))
     .filter((comment) => !allowedComment.test(comment.text))
+}
+
+// The packed files checked for comments: the server code compiled with
+// `removeComments` (tsconfig.json) and every declaration file. The admin
+// bundle is built separately and keeps its /* @__PURE__ */ annotations, so its
+// JavaScript isn't checked.
+export function isCheckedForComments(path) {
+  if (!path.startsWith(".medusa/server/")) return false
+  if (/\.d\.[cm]?ts$/.test(path)) return true
+  return /\.[cm]?js$/.test(path) && !path.startsWith(".medusa/server/src/admin/")
+}
+
+// The bare module specifiers a declaration file names, in order and once
+// each: import and export-from declarations, `import("…")` types and
+// `import x = require("…")`. Relative paths are left out.
+export function externalSpecifiers(text, fileName = "file.d.ts") {
+  const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, scriptKind(fileName))
+  const found = []
+  const add = (node) => {
+    if (node && ts.isStringLiteralLike(node) && !/^\.{0,2}\//.test(node.text) && !found.includes(node.text)) found.push(node.text)
+  }
+  const visit = (node) => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) add(node.moduleSpecifier)
+    else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) add(node.argument.literal)
+    else if (ts.isExternalModuleReference(node)) add(node.expression)
+    else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) add(node.arguments[0])
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return found
+}
+
+// The packages among `specifiers` that a store isn't sure to have: not Node's
+// own modules, and not in `pkg`'s peerDependencies or dependencies. A
+// declaration that names a package installed only as a dependency of a peer
+// (@medusajs/types under @medusajs/framework, say) gives a store errors or
+// `any`, depending on where its package manager put it.
+const packageOf = (specifier) => specifier.split("/").slice(0, specifier.startsWith("@") ? 2 : 1).join("/")
+export function undeclaredPackages(specifiers, pkg) {
+  const declared = new Set([...Object.keys(pkg.peerDependencies ?? {}), ...Object.keys(pkg.dependencies ?? {})])
+  const builtin = new Set(builtinModules)
+  const undeclared = []
+  for (const specifier of specifiers) {
+    if (specifier.startsWith("node:") || builtin.has(packageOf(specifier))) continue
+    const name = packageOf(specifier)
+    if (!declared.has(name) && !undeclared.includes(name)) undeclared.push(name)
+  }
+  return undeclared
 }
 
 function main() {
@@ -115,14 +170,19 @@ function main() {
     if (!files.has(required)) problems.push(`missing from the package: ${required}`)
   }
 
-  // The server code is compiled with `removeComments` (tsconfig.json): source
-  // comments are for this repository, not the package. The admin bundle is
-  // built separately and keeps its /* @__PURE__ */ annotations, so it isn't
-  // checked here.
+  // Source comments are for this repository, not the package.
   for (const path of files) {
-    if (!/^\.medusa\/server\/.*\.[cm]?js$/.test(path) || path.startsWith(".medusa/server/src/admin/")) continue
+    if (!isCheckedForComments(path)) continue
     for (const comment of commentsIn(readFileSync(join(root, path), "utf8"), path)) {
       problems.push(`comment in compiled code: ${path}:${comment.line}: ${comment.text.slice(0, 60)}`)
+    }
+  }
+
+  // A declaration may name only packages a store is sure to have.
+  for (const path of files) {
+    if (!/^\.medusa\/server\/.*\.d\.[cm]?ts$/.test(path)) continue
+    for (const name of undeclaredPackages(externalSpecifiers(readFileSync(join(root, path), "utf8"), path), pkg)) {
+      problems.push(`declaration names a package that isn't a peer or dependency: ${path}: ${name}`)
     }
   }
 

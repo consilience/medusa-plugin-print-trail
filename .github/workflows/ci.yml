@@ -70,8 +70,8 @@ jobs:
       - run: npm run test:integration:http
 
   # The packed tarball installed into a new project with the Medusa the tests
-  # run on, and its exports checked from there. The release also installs it
-  # with the peer range's floor, 2.17.2.
+  # run on, and its exports and declarations checked from there. The release
+  # also installs it with the peer range's floor, 2.17.2.
   install-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15

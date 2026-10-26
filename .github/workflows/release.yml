@@ -68,7 +68,7 @@ jobs:
       - name: Pack
         id: pack
         run: echo "tgz=$(npm pack --ignore-scripts --silent | tail -n 1)" >> "$GITHUB_OUTPUT"
-      - name: Install test (the export map, from a consumer)
+      - name: Install test (exports and declarations, from a consumer)
         env:
           TGZ: ${{ github.workspace }}/${{ steps.pack.outputs.tgz }}
         run: |
