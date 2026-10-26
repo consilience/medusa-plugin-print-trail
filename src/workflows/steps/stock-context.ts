@@ -11,6 +11,7 @@ import {
   type BackorderReason,
   type StockVariant,
 } from "../../lib/stock"
+import { SKU_CHECK_QUEUE_PREFIX } from "../../lib/sku-check-queue"
 import type { MetadataPage, PluginMetadata, StockCatalogue, StockContext } from "../../lib/stock-flow"
 import { installedMetadataUpdateMode, patchVariantMetadata, type VariantMetadataStore } from "../../lib/variant-metadata"
 import { PRINT_TRAIL_MODULE } from "../../modules/printTrail"
@@ -33,6 +34,7 @@ export const STOCK_VARIANT_FIELDS = [
 
 const PRODUCT_CHUNK = 200
 const VARIANT_CHUNK = 100
+const LIVE_CHUNK = 500
 
 type GraphStockVariant = {
   id: string
@@ -205,14 +207,40 @@ export async function listPluginMetadata(
   return { found, lastId: rows.length ? rows[rows.length - 1].id : null, read: rows.length }
 }
 
+// The variants of these ids Medusa still has (Query leaves out soft-deleted
+// ones by default).
+export async function loadLiveVariants(
+  query: Omit<RemoteQueryFunction, symbol>,
+  ids: string[]
+): Promise<{ id: string; productId: string }[]> {
+  const out: { id: string; productId: string }[] = []
+  for (let i = 0; i < ids.length; i += LIVE_CHUNK) {
+    const { data } = await query.graph({ entity: "product_variant", fields: ["id", "product_id"], filters: { id: ids.slice(i, i + LIVE_CHUNK) } })
+    for (const v of data as { id: string; product_id?: string | null }[]) if (v.product_id) out.push({ id: v.id, productId: v.product_id })
+  }
+  return out
+}
+
 export function buildStockCatalogue(container: MedusaContainer): StockCatalogue {
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
   const metadata = buildVariantMetadataStore(container)
+  // The run's product → profile link, read once by loadVariants and reused
+  // by ptProductIds (one catalogue per run).
+  let profileLink: { key: string; map: Map<string, string> } | null = null
+  const profileByProduct = async (ptProfileIds: string[]) => {
+    const key = [...ptProfileIds].sort().join("\n")
+    if (profileLink?.key !== key) profileLink = { key, map: await loadProfileByProduct(query, { profileIds: ptProfileIds }) }
+    return profileLink.map
+  }
   return {
     ptProfileIds: () => loadPtProfileIds(query),
+    async ptProductIds(ptProfileIds) {
+      return new Set((await profileByProduct(ptProfileIds)).keys())
+    },
+    liveVariants: (ids) => loadLiveVariants(query, ids),
     async loadVariants(ptProfileIds) {
-      const profileByProduct = await loadProfileByProduct(query, { profileIds: ptProfileIds })
-      const productIds = [...profileByProduct.keys()]
+      const byProduct = await profileByProduct(ptProfileIds)
+      const productIds = [...byProduct.keys()]
       const variants: StockVariant[] = []
       for (let i = 0; i < productIds.length; i += PRODUCT_CHUNK) {
         const { data } = await query.graph({
@@ -220,7 +248,7 @@ export function buildStockCatalogue(container: MedusaContainer): StockCatalogue 
           fields: STOCK_VARIANT_FIELDS,
           filters: { product_id: productIds.slice(i, i + PRODUCT_CHUNK), manage_inventory: true },
         })
-        variants.push(...toStockVariants(data, profileByProduct))
+        variants.push(...toStockVariants(data, byProduct))
       }
       return variants
     },
@@ -258,5 +286,11 @@ export async function buildStockContext(container: MedusaContainer): Promise<Sto
     options: await service.getOptions(),
     seen: service,
     logger: container.resolve(ContainerRegistrationKeys.LOGGER),
+    variants: {
+      rowPage: (after, take) => service.variantRowPage(after, take),
+      forget: (filter) => service.forgetVariants(filter),
+      setCheckStatuses: (updates) => service.setCheckStatuses(updates),
+      queueChecks: (ids) => service.queueStateKeys(SKU_CHECK_QUEUE_PREFIX, ids),
+    },
   }
 }

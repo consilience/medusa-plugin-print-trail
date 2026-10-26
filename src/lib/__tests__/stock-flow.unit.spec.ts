@@ -18,6 +18,9 @@ import {
 } from "../stock-flow"
 import type { StateStore } from "../team-code"
 import { markWaitingSkus, memoryPreOrderSeen } from "../pre-order"
+import type { SkuCheck } from "../sku-check"
+import { checkColumns, type VariantCheckRow } from "../variant-checks"
+import type { CheckStatusUpdate } from "../../modules/printTrail/service"
 
 const NOW = new Date("2026-10-19T12:00:00Z")
 const PT = "sp_pt"
@@ -88,6 +91,23 @@ class FakeCatalogue implements StockCatalogue {
     this.check("clearBackorderMarkers", [ids])
     for (const v of [...this.variants, ...this.outside]) if (ids.includes(v.id)) v.backorderMarker = null
   }
+  // Each variant's product (prod_{id} unless set), and the variants Medusa
+  // no longer has (deleted without an event): never live.
+  productOf = new Map<string, string>()
+  deleted = new Set<string>()
+  product(id: string) {
+    return this.productOf.get(id) ?? `prod_${id}`
+  }
+  async ptProductIds(profiles: string[]) {
+    this.check("ptProductIds", [profiles])
+    return new Set(this.variants.filter((v) => v.profileId && profiles.includes(v.profileId)).map((v) => this.product(v.id)))
+  }
+  async liveVariants(ids: string[]) {
+    this.check("liveVariants", [ids])
+    return [...this.variants, ...this.outside]
+      .filter((v) => ids.includes(v.id) && !this.deleted.has(v.id))
+      .map((v) => ({ id: v.id, productId: this.product(v.id) }))
+  }
   // Called after each page is read, before it is returned: a variant can be
   // deleted, or the clock moved, between pages.
   onPage?: (page: number) => void
@@ -129,6 +149,57 @@ class FakeCatalogue implements StockCatalogue {
   }
 }
 
+// print_trail_variant rows, in memory.
+class MemoryVariantRows {
+  rows: VariantCheckRow[] = []
+  queued: string[] = []
+  calls: string[] = []
+  private failing = new Set<string>()
+  failNext(method: string) {
+    this.failing.add(method)
+  }
+  private hit(method: string) {
+    this.calls.push(method)
+    if (this.failing.delete(method)) throw new Error(`${method} broke`)
+  }
+  add(variantId: string, productId: string, check: SkuCheck | null) {
+    this.rows.push({ id: `ptvar_${variantId}`, variant_id: variantId, product_id: productId, ...checkColumns(check, "sku-check") })
+  }
+  get(variantId: string) {
+    return this.rows.find((r) => r.variant_id === variantId)
+  }
+  async rowPage(after: string | null, take: number) {
+    this.hit("rowPage")
+    return JSON.parse(
+      JSON.stringify(
+        [...this.rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).filter((r) => after === null || r.id > after).slice(0, take)
+      )
+    ) as VariantCheckRow[]
+  }
+  async forget(filter: { variantIds?: string[]; productIds?: string[] }) {
+    this.hit("forget")
+    const before = this.rows.length
+    this.rows = this.rows.filter((r) => !filter.variantIds?.includes(r.variant_id) && !filter.productIds?.includes(r.product_id))
+    return before - this.rows.length
+  }
+  async setCheckStatuses(updates: CheckStatusUpdate[]) {
+    this.hit("setCheckStatuses")
+    let n = 0
+    for (const u of updates) {
+      const r = this.rows.find((x) => x.id === u.id)
+      if (!r || r.check_sku !== u.expect.sku || r.check_status !== u.expect.status) continue
+      if (u.status === null) Object.assign(r, checkColumns(null, "stock-sync"))
+      else Object.assign(r, { check_status: u.status, checked_at: u.at, check_source: "stock-sync" })
+      n++
+    }
+    return n
+  }
+  async queueChecks(ids: string[]) {
+    this.hit("queueChecks")
+    for (const id of ids) if (!this.queued.includes(id)) this.queued.push(id)
+  }
+}
+
 const variant = (id: string, sku: string, over: Partial<StockVariant> = {}): StockVariant => ({
   id,
   sku,
@@ -152,6 +223,7 @@ const variant = (id: string, sku: string, over: Partial<StockVariant> = {}): Sto
 let mock: MockPrintTrail
 let state: MemoryState
 let catalogue: FakeCatalogue
+let variantRows: MemoryVariantRows
 let ctx: StockContext
 let warnings: string[]
 
@@ -164,6 +236,7 @@ beforeEach(async () => {
     skus: { "9780000000002": 25, "9780000000019": 0, "9780000000026": 10003 },
   })
   state = new MemoryState()
+  variantRows = new MemoryVariantRows()
   catalogue = new FakeCatalogue([
     variant("v1", "9780000000002"),
     variant("v2", "9780000000019"),
@@ -178,6 +251,7 @@ beforeEach(async () => {
     now: () => NOW,
     logger: { warn: (m: string) => warnings.push(m), error: (m: string) => warnings.push(m) },
     seen: memoryPreOrderSeen(),
+    variants: variantRows,
   }
   warnings = []
 })
@@ -410,6 +484,59 @@ describe("runs that can't be trusted", () => {
       ],
     })
     expect(warnings.filter((w) => /locations/.test(w))).toHaveLength(1)
+  })
+})
+
+describe("forgetting variants", () => {
+  const notFound = (sku: string): SkuCheck => ({ sku, status: "not-found", checked_at: NOW.toISOString() })
+
+  it("a full run deletes the row of a variant deleted without an event", async () => {
+    variantRows.add("v1", "prod_v1", notFound("9780000000002"))
+    // Deleted through the product module, or replaced by a product update.
+    for (let i = 0; i < 600; i++) variantRows.add(`vgone${String(i).padStart(3, "0")}`, "prod_v1", notFound(`GONE-${i}`))
+    catalogue.variants.push(variant("v_soft", "SOFT-1"))
+    catalogue.deleted.add("v_soft")
+    variantRows.add("v_soft", "prod_v_soft", notFound("SOFT-1"))
+    const result = await runStockSync(ctx, { trigger: "schedule" })
+    expect(result.status).toBe("completed")
+    expect(variantRows.rows.map((r) => r.variant_id)).toEqual(["v1"])
+  })
+
+  it("a full run deletes rows outside Print Trail's profiles", async () => {
+    variantRows.add("v1", "prod_v1", notFound("9780000000002"))
+    catalogue.outside.push(variant("v9", "9780000000002", { profileId: "sp_default" }))
+    variantRows.add("v9", "prod_v9", notFound("9780000000002"))
+    await runStockSync(ctx, { trigger: "schedule" })
+    expect(variantRows.rows.map((r) => r.variant_id)).toEqual(["v1"])
+  })
+
+  it("a SKU-only run, or a run that isn't trusted (no profiles, no levels), prunes nothing", async () => {
+    variantRows.add("v_gone", "prod_v1", notFound("GONE-1"))
+    await runStockSync(ctx, { trigger: "shortfall", skus: ["9780000000002"] })
+    expect(variantRows.get("v_gone")).toBeDefined()
+
+    catalogue.profiles = []
+    expect((await runStockSync(ctx, { trigger: "schedule" })).status).toBe("failed")
+    expect(variantRows.get("v_gone")).toBeDefined()
+
+    catalogue.profiles = [PT]
+    for (const k of Object.keys(mock.state.stock)) delete mock.state.stock[k]
+    mock.state.nullSkuRows = 2
+    expect((await runStockSync(ctx, { trigger: "schedule" })).status).toBe("failed")
+    expect(variantRows.get("v_gone")).toBeDefined()
+    expect(variantRows.calls).toEqual([])
+  })
+
+  it("a prune failure doesn't fail the run", async () => {
+    variantRows.add("v_gone", "prod_v1", notFound("GONE-1"))
+    variantRows.failNext("rowPage")
+    const result = await runStockSync(ctx, { trigger: "schedule" })
+    expect(result.status).toBe("completed")
+    expect(variantRows.get("v_gone")).toBeDefined()
+    expect(warnings.join("\n")).toMatch(/rowPage broke/)
+    // The next full run prunes it.
+    await runStockSync(ctx, { trigger: "schedule" })
+    expect(variantRows.get("v_gone")).toBeUndefined()
   })
 })
 

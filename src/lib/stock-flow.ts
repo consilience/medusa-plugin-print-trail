@@ -1,6 +1,7 @@
 import type { PrintTrailPluginOptions } from "../config"
 import type { PrintTrailClient } from "../modules/printTrail/client/client"
 import type { PtStockLevel } from "../modules/printTrail/client/types"
+import type { SkuCheckStatus } from "./sku-check"
 import { readPreOrders, type PreOrderSeenStore, type PreOrderSku } from "./pre-order"
 import { normaliseSku } from "./sku"
 import {
@@ -21,6 +22,7 @@ import {
   type Watermark,
 } from "./stock"
 import type { StateStore } from "./team-code"
+import type { VariantCheckRow } from "./variant-checks"
 
 // The stock sync's step logic over small ports: Print Trail's stock levels in,
 // Medusa inventory levels and backorder flags out. The workflow takes the
@@ -55,6 +57,22 @@ export type StockCatalogue = {
   // One page of the metadata scan: up to `take` variants with ids after
   // `after` (null: from the first), by id ascending.
   listPluginMetadata(after: string | null, take: number): Promise<MetadataPage>
+  // The products in these Print Trail profiles (the run's loadVariants reads
+  // the same link, so it may come from there).
+  ptProductIds(ptProfileIds: string[]): Promise<Set<string>>
+  // The variants Medusa still has (soft-deleted ones left out), of these ids.
+  liveVariants(ids: string[]): Promise<{ id: string; productId: string }[]>
+}
+
+// print_trail_variant, the SKU checks (PrintTrailModuleService).
+export type VariantRowStore = {
+  rowPage(after: string | null, take: number): Promise<VariantCheckRow[]>
+  forget(filter: { variantIds?: string[]; productIds?: string[] }): Promise<number>
+  setCheckStatuses(
+    updates: { id: string; expect: { sku: string | null; status: string }; status: SkuCheckStatus | null; at: Date }[]
+  ): Promise<number>
+  // Queues these variants for the SKU check (drained by the sweep).
+  queueChecks(variantIds: string[]): Promise<void>
 }
 
 export type PluginMetadata = { id: string; preOrderField: unknown; backorderMarker: BackorderReason | null }
@@ -77,6 +95,7 @@ export type StockContext = {
   logger?: { warn(msg: string): void; error(msg: string): void }
   // Where SKUs seen on pre-order are kept for the activation scan.
   seen: PreOrderSeenStore
+  variants: VariantRowStore
 }
 
 export type StockWarning = { type: "duplicate-sku" | "unknown-figure" | "multi-location"; skus: string[] }
@@ -319,6 +338,34 @@ export async function scanPluginMetadata(
   }
 }
 
+export const VARIANT_ROW_PAGE = 500
+
+// A trusted full run sees every Print Trail product: the SKU check of a
+// variant Medusa no longer has (deleted without an event, as when a product
+// update replaces its variants), or whose product has left Print Trail's
+// profiles, is forgotten, so its SKU leaves the notice. A product that
+// rejoins a profile is checked again when it's saved. A failure is logged;
+// the run still completes.
+export async function pruneVariantRows(ctx: StockContext, ptProducts: Set<string>): Promise<void> {
+  try {
+    let after: string | null = null
+    for (;;) {
+      const rows = await ctx.variants.rowPage(after, VARIANT_ROW_PAGE)
+      if (!rows.length) return
+      const live = new Map((await ctx.catalogue.liveVariants(rows.map((r) => r.variant_id))).map((v) => [v.id, v.productId]))
+      const gone = rows.filter((r) => {
+        const productId = live.get(r.variant_id)
+        return productId === undefined || !ptProducts.has(productId)
+      })
+      if (gone.length) await ctx.variants.forget({ variantIds: gone.map((r) => r.variant_id) })
+      if (rows.length < VARIANT_ROW_PAGE) return
+      after = rows[rows.length - 1].id
+    }
+  } catch (e) {
+    ctx.logger?.warn(`Print Trail stock sync: couldn't forget the SKU checks of deleted variants: ${message(e)}; trying again with the next full sync`)
+  }
+}
+
 // Under the lock. Returns results; only a state-store error throws.
 export async function runStockSync(ctx: StockContext, input: StockSyncInput): Promise<StockSyncResult> {
   const now = () => (ctx.now ? ctx.now() : new Date())
@@ -440,7 +487,16 @@ export async function runStockSync(ctx: StockContext, input: StockSyncInput): Pr
     }
     // Full runs only: a SKU-only run (a confirm's shortfall, a dispatch, a
     // SKU check) stays short.
-    if (!input.skus) await scanPluginMetadata(ctx, { inScope, tracked, startedAt: new Date(startedAt) })
+    if (!input.skus) {
+      let ptProducts: Set<string> | null = null
+      try {
+        ptProducts = await ctx.catalogue.ptProductIds(profiles)
+      } catch (e) {
+        ctx.logger?.warn(`Print Trail stock sync: couldn't read the Print Trail products: ${message(e)}; SKU checks are pruned with the next full sync`)
+      }
+      if (ptProducts) await pruneVariantRows(ctx, ptProducts)
+      await scanPluginMetadata(ctx, { inScope, tracked, startedAt: new Date(startedAt) })
+    }
   } catch (e) {
     const error = message(e)
     await record(plan, error, warnings)
