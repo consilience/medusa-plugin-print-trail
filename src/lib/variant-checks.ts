@@ -49,6 +49,13 @@ export function toSkuCheck(row: VariantCheckRow | null | undefined): SkuCheck | 
   return check
 }
 
+// A check's time as a date, or null when it isn't one: a legacy check may
+// carry none, or text that isn't a date, which the database won't take.
+const checkedAt = (at: unknown): Date | null => {
+  const date = at instanceof Date ? at : typeof at === "string" && at ? new Date(at) : null
+  return date && !Number.isNaN(date.getTime()) ? date : null
+}
+
 // Every check column, so a write always replaces the whole check: an absent
 // matched_sku or note is written as null. A null check clears it.
 export function checkColumns(check: SkuCheck | null, source: CheckSource): CheckColumns {
@@ -57,7 +64,7 @@ export function checkColumns(check: SkuCheck | null, source: CheckSource): Check
     check_status: check?.status ?? null,
     check_matched_sku: check?.matched_sku ?? null,
     check_note: check?.note ?? null,
-    checked_at: check ? new Date(check.checked_at) : null,
+    checked_at: check ? checkedAt(check.checked_at) : null,
     check_source: source,
   }
 }

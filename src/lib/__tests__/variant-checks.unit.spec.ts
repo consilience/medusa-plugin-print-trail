@@ -69,6 +69,18 @@ describe("toSkuCheck and checkColumns", () => {
     expect(toSkuCheck(row({ check_sku: "A", check_status: "matched", checked_at: new Date(AT) }))?.checked_at).toBe(AT)
     expect(toSkuCheck(row({ check_sku: "A", check_status: "matched", checked_at: AT }))?.checked_at).toBe(AT)
   })
+
+  // The database refuses an invalid date, which would fail every write of
+  // the page it is on.
+  it("write a check whose time is missing or isn't a date with a null checked_at", () => {
+    for (const checked_at of ["", "yesterday", "2026-13-45T99:00:00Z", undefined, 42, null]) {
+      const columns = checkColumns({ sku: "A", status: "matched", checked_at } as unknown as SkuCheck, "metadata")
+      expect(columns).toMatchObject({ check_sku: "A", check_status: "matched", checked_at: null })
+    }
+    expect(checkColumns({ sku: "A", status: "matched", checked_at: AT }, "metadata").checked_at).toEqual(new Date(AT))
+    // Read back, the check has no time, as a legacy check without one does.
+    expect(toSkuCheck(row({ check_sku: "A", check_status: "matched", checked_at: null }))).toEqual({ sku: "A", status: "matched", checked_at: "" })
+  })
 })
 
 describe("storedCheck", () => {
@@ -93,6 +105,16 @@ describe("storedCheck", () => {
       note: "numeric-override",
     })
     expect(storedCheck(null, null)).toBeNull()
+  })
+
+  // Hand-edited or imported metadata: the check is kept, and its time
+  // becomes null when it is stored (checkColumns).
+  it("keeps a legacy check whose checked_at is missing, not a string or not a date", () => {
+    for (const checked_at of [undefined, 42, null, { at: AT }, "not a date"]) {
+      const check = legacyCheckOf({ [LEGACY_SKU_CHECK_KEY]: { sku: "OLD-1", status: "not-found", checked_at } })
+      expect(check).toEqual({ sku: "OLD-1", status: "not-found", checked_at: typeof checked_at === "string" ? checked_at : "" })
+      expect(checkColumns(check, "metadata")).toMatchObject({ check_sku: "OLD-1", check_status: "not-found", checked_at: null, check_source: "metadata" })
+    }
   })
 
   it("rejects a malformed legacy value", () => {

@@ -188,6 +188,76 @@ moduleIntegrationTestRunner<PrintTrailModuleService>({
           expect(await service.adoptVariantChecks([])).toBe(0)
         })
 
+        it("adopts a legacy check whose checked_at is missing or isn't a date, with no time", async () => {
+          const created = await service.adoptVariantChecks([
+            { variantId: "var_t1", productId: "prod_t", check: check("T-1", "matched", { checked_at: "" }) },
+            { variantId: "var_t2", productId: "prod_t", check: check("T-2", "not-found", { checked_at: "not a date" }) },
+          ])
+          expect(created).toBe(2)
+          const rows = await service.variantRows(["var_t1", "var_t2"])
+          expect(rows.get("var_t1")).toMatchObject({ check_sku: "T-1", check_status: "matched", checked_at: null, check_source: "metadata" })
+          expect(rows.get("var_t2")).toMatchObject({ check_sku: "T-2", check_status: "not-found", checked_at: null })
+        })
+
+        it("keeps a row written between the read and the batch create, and creates the rest", async () => {
+          // The module's service is reached through a proxy, so the class is spied on.
+          const read = PrintTrailModuleService.prototype.variantRows
+          const spy = jest.spyOn(PrintTrailModuleService.prototype, "variantRows").mockImplementationOnce(async function (this: PrintTrailModuleService, ids) {
+            const rows = await read.call(this, ids)
+            // A SKU check lands after the read: the batch create conflicts.
+            await service.writeVariantCheck({ variantId: "var_b1", productId: "prod_b", check: check("NEW", "matched"), source: "sku-check" })
+            return rows
+          })
+          try {
+            const created = await service.adoptVariantChecks([
+              { variantId: "var_b1", productId: "prod_b", check: check("OLD-1", "not-found") },
+              { variantId: "var_b2", productId: "prod_b", check: check("OLD-2", "inactive") },
+            ])
+            expect(created).toBe(1)
+          } finally {
+            spy.mockRestore()
+          }
+          const rows = await service.variantRows(["var_b1", "var_b2"])
+          expect(rows.get("var_b1")).toMatchObject({ check_sku: "NEW", check_source: "sku-check" })
+          expect(rows.get("var_b2")).toMatchObject({ check_sku: "OLD-2", check_status: "inactive", check_source: "metadata" })
+          expect(await service.listPrintTrailVariants({ variant_id: ["var_b1", "var_b2"] })).toHaveLength(2)
+        })
+
+        it("skips a check the database refuses, and creates the rest", async () => {
+          const created = await service.adoptVariantChecks([
+            { variantId: "var_r1", productId: "prod_r", check: check("R-1", "matched") },
+            // A row the database can't take (product_id is required).
+            { variantId: "var_r2", productId: null as never, check: check("R-2", "matched") },
+            { variantId: "var_r3", productId: "prod_r", check: check("R-3", "not-found") },
+          ])
+          expect(created).toBe(2)
+          const rows = await service.variantRows(["var_r1", "var_r2", "var_r3"])
+          expect([...rows.keys()].sort()).toEqual(["var_r1", "var_r3"])
+        })
+
+        it("fails when the database can't be read after a failed create, so nothing is taken as skipped", async () => {
+          const proto = PrintTrailModuleService.prototype
+          const list = proto.listPrintTrailVariants
+          const lost = new Error("Connection terminated unexpectedly")
+          const create = jest.spyOn(proto, "createPrintTrailVariants").mockRejectedValue(lost)
+          // variantRows reads; the look for a row written meanwhile fails.
+          const listing = jest
+            .spyOn(proto, "listPrintTrailVariants")
+            .mockImplementationOnce(function (this: PrintTrailModuleService, ...args: Parameters<typeof list>) {
+              return list.apply(this, args)
+            })
+            .mockRejectedValueOnce(lost)
+          try {
+            await expect(
+              service.adoptVariantChecks([{ variantId: "var_o1", productId: "prod_o", check: check("O-1", "matched") }])
+            ).rejects.toThrow("Connection terminated unexpectedly")
+          } finally {
+            create.mockRestore()
+            listing.mockRestore()
+          }
+          expect((await service.variantRows(["var_o1"])).size).toBe(0)
+        })
+
         it("forgets variants by variant and by product", async () => {
           for (const [variantId, productId] of [["var_f1", "prod_f1"], ["var_f2", "prod_f1"], ["var_f3", "prod_f2"]]) {
             await service.writeVariantCheck({ variantId, productId, check: check("S", "matched"), source: "sku-check" })

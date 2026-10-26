@@ -12,7 +12,7 @@ import { PRE_ORDER_SEEN_PREFIX } from "../../lib/pre-order"
 import { normaliseSku } from "../../lib/sku"
 import type { SkuCheck, SkuCheckStatus } from "../../lib/sku-check"
 import { createEachUnlessExists } from "../../lib/state-queue"
-import { checkColumns, type CheckSource, type VariantCheckRow } from "../../lib/variant-checks"
+import { checkColumns, type CheckColumns, type CheckSource, type VariantCheckRow } from "../../lib/variant-checks"
 import { PrintTrailClient, STATUS_CLIENT_TUNING, type RateLimitGate } from "./client/client"
 import { PROBLEM_TYPES } from "./client/errors"
 import PrintTrailOrder from "./models/print-trail-order"
@@ -32,6 +32,8 @@ const chunks = <T>(items: T[], size: number): T[][] => {
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
   return out
 }
+
+type VariantRowInput = { variant_id: string; product_id: string } & CheckColumns
 
 export type CheckStatusUpdate = {
   id: string
@@ -265,23 +267,49 @@ class PrintTrailModuleService extends MedusaService({
       const seen = new Set<string>()
       const missing = chunk.filter((r) => !existing.has(r.variantId) && !seen.has(r.variantId) && seen.add(r.variantId))
       if (!missing.length) continue
-      const data = (r: (typeof missing)[number]) => ({ variant_id: r.variantId, product_id: r.productId, ...checkColumns(r.check, "metadata") })
+      const data = (r: (typeof missing)[number]): VariantRowInput => ({
+        variant_id: r.variantId,
+        product_id: r.productId,
+        ...checkColumns(r.check, "metadata"),
+      })
       try {
         await this.createPrintTrailVariants(missing.map(data))
         created += missing.length
       } catch {
-        // A row was created meanwhile: one at a time, keeping the newer.
+        // A row was created meanwhile, or one of them can't be stored: one at
+        // a time.
         for (const r of missing) {
-          try {
-            await this.createPrintTrailVariants(data(r))
-            created++
-          } catch (e) {
-            if (!(await this.listPrintTrailVariants({ variant_id: r.variantId }, { select: ["id"] })).length) throw e
-          }
+          if (await this.adoptOne(data(r))) created++
         }
       }
     }
     return created
+  }
+
+  // One legacy check's row; whether it was created. After a failed create,
+  // the variant's row is looked for: a row written meanwhile wins, and a
+  // database that can't be read throws, so the scan keeps its cursor and
+  // tries the page again. With no row, the create is tried once more, so a
+  // passing failure isn't taken for a bad row; failing again, the check is
+  // skipped and logged, so one row the database refuses can't hold the scan
+  // back for good. (Its legacy key is still deleted: the variant is checked
+  // again when it's next saved.) The error itself isn't relied on: Postgres
+  // gives some refusals of a row's data a connection-class code.
+  private async adoptOne(data: VariantRowInput): Promise<boolean> {
+    const hasRow = async () => (await this.listPrintTrailVariants({ variant_id: data.variant_id }, { select: ["id"] })).length > 0
+    let error: unknown
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await this.createPrintTrailVariants(data)
+        return true
+      } catch (e) {
+        error = e
+      }
+      if (await hasRow()) return false
+    }
+    const reason = String((error as Error)?.message ?? error).split("\n")[0]
+    this.logger_?.warn(`Print Trail: skipped the SKU check in variant ${data.variant_id}'s metadata, which couldn't be stored: ${reason}`)
+    return false
   }
 
   // Hard-deletes the rows of these variants, or of these products' variants.
