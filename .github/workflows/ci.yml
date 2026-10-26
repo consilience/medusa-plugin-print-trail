@@ -68,3 +68,27 @@ jobs:
           PT_DENY_TERMS: ${{ secrets.PT_DENY_TERMS }}
       - run: npm run test:integration:modules
       - run: npm run test:integration:http
+
+  # The packed tarball installed into a new project with the Medusa the tests
+  # run on, and its exports checked from there. The release also installs it
+  # with the peer range's floor, 2.17.2.
+  install-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Pack
+        id: pack
+        run: echo "tgz=$(npm pack --ignore-scripts --silent | tail -n 1)" >> "$GITHUB_OUTPUT"
+      - name: Install test
+        env:
+          TGZ: ${{ github.workspace }}/${{ steps.pack.outputs.tgz }}
+        run: scripts/install-test.sh "$TGZ" 2.22.1

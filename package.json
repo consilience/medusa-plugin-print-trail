@@ -22,11 +22,13 @@
   ],
   "exports": {
     "./package.json": "./package.json",
+    "./.medusa/server/src/modules/printTrail": "./.medusa/server/src/modules/printTrail/index.js",
+    "./config": "./.medusa/server/src/config.js",
     "./workflows": "./.medusa/server/src/workflows/index.js",
-    "./.medusa/server/src/modules/*": "./.medusa/server/src/modules/*/index.js",
-    "./modules/*": "./.medusa/server/src/modules/*/index.js",
-    "./providers/*": "./.medusa/server/src/providers/*/index.js",
-    "./*": "./.medusa/server/src/*.js",
+    "./modules/printTrail": "./.medusa/server/src/modules/printTrail/index.js",
+    "./providers/print-trail": "./.medusa/server/src/providers/print-trail/index.js",
+    "./stock": "./.medusa/server/src/stock.js",
+    "./shipping-options": "./.medusa/server/src/shipping-options.js",
     "./admin": {
       "import": "./.medusa/server/src/admin/index.mjs",
       "require": "./.medusa/server/src/admin/index.js",

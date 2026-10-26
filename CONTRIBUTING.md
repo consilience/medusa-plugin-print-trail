@@ -50,6 +50,17 @@ DB_HOST=localhost DB_USERNAME=<pg user> DB_PASSWORD=<pg password> npm run test:i
 
 No test, script or CI job reaches Print Trail production.
 
+### The package's exports
+
+`exports` in `package.json` lists each public entry point: `/config`, `/workflows`, `/modules/printTrail`, `/providers/print-trail`, `/stock`, `/shipping-options` and `/admin` (Medusa's admin bundler resolves it under both `require` and `import`), plus `/.medusa/server/src/modules/printTrail`, the path Medusa loads the module from when a store lists the plugin. There is no pattern, so nothing else under `.medusa/server` can be imported, and a file that isn't an entry point can change in any release. `src/stock.ts` and `src/shipping-options.ts` re-export what a store may use from `src/lib`. `src/__tests__/public-api.unit.spec.ts` checks the list.
+
+`scripts/install-test.sh <tgz> <medusa version>` installs a packed tarball with that version of Medusa into a new temporary project, as a store would (no `--legacy-peer-deps`), and runs `scripts/check-exports.cjs` there. It checks that every entry point resolves and loads, that `/admin` resolves under `require` and `import`, that Medusa's own plugin resolution finds the module and the admin build, and that a deep import of an internal file fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`. The project is removed afterwards.
+
+```bash
+npm run build && npm pack
+scripts/install-test.sh medusa-plugin-print-trail-<version>.tgz 2.22.1
+```
+
 ### Staging checklist
 
 `npm run checklist:staging` checks a real Medusa store with the plugin installed, scenario by scenario, against Print Trail staging. It drives the store through its admin and store APIs, reads Print Trail through the plugin's own client, and reports each check as pass, fail, skipped or manual. It lives in `scripts/staging-checklist/` and isn't part of the package.
@@ -103,7 +114,7 @@ On staging, `cancel-too-late` races the dispatch webhook: the script cancels the
 
 ### CI
 
-- `.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: lint, typecheck, the repository check, unit tests, build, package check, then the module and HTTP integration tests, with Postgres 16 and Redis 7 services. It has no Print Trail credentials. The two checks read the maintainers' term list from the `PT_DENY_TERMS` repository secret (Settings, Secrets and variables, Actions), which `release.yml` uses too.
+- `.github/workflows/ci.yml` runs on pushes to `main` and on pull requests. Its `test` job runs lint, typecheck, the repository check, unit tests, build, package check, then the module and HTTP integration tests, with Postgres 16 and Redis 7 services. Its `install-test` job builds and packs the plugin and runs `scripts/install-test.sh` with Medusa 2.22.1. Neither has Print Trail credentials. The two checks read the maintainers' term list from the `PT_DENY_TERMS` repository secret (Settings, Secrets and variables, Actions), which `release.yml` uses too.
 - `.github/workflows/staging.yml` runs the staging smoke test. It is manual only (`workflow_dispatch` with a `confirm` input) and reads its credentials from the `staging` environment's secrets. Set up that environment with the four `PRINT_TRAIL_STAGING_*` secrets (`BASE_URL`, `CHANNEL_ID`, `API_TOKEN`, `SKUS`), and restrict its deployment branches to `main`, so a workflow file changed on another branch can't read them.
 
 ### Troubleshooting
@@ -130,7 +141,7 @@ On staging, `cancel-too-late` races the dispatch webhook: the script cancels the
 
 A pushed tag `v<version>` runs `.github/workflows/release.yml`, which has two jobs:
 
-- **`release`** runs lint, typecheck, the repository check, the unit tests, the build and the package check; checks that the tag, `package.json`'s `version` and a `## [<version>]` section of `CHANGELOG.md` agree; runs `npm pack`; installs the tarball into an empty project with Medusa 2.17.2 and with 2.22.1, resolving its exports; uploads the tarball as the run's `package` artifact; and creates a GitHub Release with the tarball attached and that changelog section as its notes, marked as a prerelease when the version has a `-`. It can write releases (`contents: write`) but can't request an OIDC token.
+- **`release`** runs lint, typecheck, the repository check, the unit tests, the build and the package check; checks that the tag, `package.json`'s `version` and a `## [<version>]` section of `CHANGELOG.md` agree; runs `npm pack`; runs `scripts/install-test.sh` on the tarball with Medusa 2.17.2 and with 2.22.1; uploads the tarball as the run's `package` artifact; and creates a GitHub Release with the tarball attached and that changelog section as its notes, marked as a prerelease when the version has a `-`. It can write releases (`contents: write`) but can't request an OIDC token.
 - **`publish`** runs after `release` succeeds, only when the repository variable `NPM_PUBLISH` is `true`, in the `npm` environment. It downloads the `package` artifact and publishes that tarball to npm (below). Its only permission is `id-token: write`, no other job has it, and it doesn't check out the repository or run any project script, so none of the dependencies `npm ci` installs runs where the token can be requested. The split keeps the token away from dependency code. It doesn't check the tarball independently: `release` builds it with those dependencies installed.
 
 Until `NPM_PUBLISH` is set, `publish` is skipped and a tag only makes the GitHub Release.
