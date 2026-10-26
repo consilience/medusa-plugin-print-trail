@@ -83,6 +83,33 @@ describe("packages a declaration file names", () => {
     ).toEqual(["@medusajs/orchestration", "@medusajs/types"])
   })
 
+  // A path into node_modules, or an absolute one, resolves only where the
+  // package was built.
+  const paths = [
+    'import type { A } from "../../node_modules/@medusajs/types/dist/a";',
+    'export * from "/opt/build/node_modules/@medusajs/types";',
+    'declare const b: import("/opt/build/src/b").B;',
+    'import c = require("./node_modules/c");',
+    'import type { Local } from "./local";',
+    'export { other } from "../other";',
+  ].join("\n")
+
+  it("lists a path into node_modules, or an absolute one, with the bare specifiers", () => {
+    expect(result(`return m.externalSpecifiers(${JSON.stringify(paths)}, "src/x.d.ts")`)).toEqual([
+      "../../node_modules/@medusajs/types/dist/a",
+      "/opt/build/node_modules/@medusajs/types",
+      "/opt/build/src/b",
+      "./node_modules/c",
+    ])
+  })
+
+  it("reports each such path whole, even one naming a peer", () => {
+    const pkg = { peerDependencies: { "@medusajs/framework": "^2.17.2", "@medusajs/types": "^2.17.2" } }
+    expect(
+      result(`return m.undeclaredPackages(m.externalSpecifiers(${JSON.stringify(paths)}, "src/x.d.ts"), ${JSON.stringify(pkg)})`)
+    ).toEqual(["../../node_modules/@medusajs/types/dist/a", "/opt/build/node_modules/@medusajs/types", "/opt/build/src/b", "./node_modules/c"])
+  })
+
   it("accepts @medusajs/framework/utils, @medusajs/medusa/core-flows and Node's own modules", () => {
     const pkg = { peerDependencies: { "@medusajs/framework": "^2.17.2", "@medusajs/medusa": "^2.17.2" } }
     expect(

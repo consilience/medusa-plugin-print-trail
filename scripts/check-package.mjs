@@ -3,7 +3,8 @@
 // staging checklist or CONTRIBUTING.md, every `exports` target present, the
 // README, changelog and licence included, no comments in the compiled server
 // code or its declarations, no declaration naming a package that isn't a peer
-// or dependency, no binary file in the server code, and no internal references
+// or dependency (or a path into node_modules, or an absolute one), no binary
+// file in the server code, and no internal references
 // in any packed file's name or text (scripts/deny-terms.mjs: the generic
 // patterns and the maintainers' private term list, without which the check
 // fails). Run after `npm run build`. The checks on file contents are exported,
@@ -69,14 +70,21 @@ export function isCheckedForComments(path) {
   return /\.[cm]?js$/.test(path) && !path.startsWith(".medusa/server/src/admin/")
 }
 
-// The bare module specifiers a declaration file names, in order and once
-// each: import and export-from declarations, `import("…")` types and
-// `import x = require("…")`. Relative paths are left out.
+// A specifier that is an absolute path or reaches into node_modules: it
+// resolves only where the package was built, whichever packages it names.
+export const isBuildPath = (specifier) => specifier.startsWith("/") || specifier.includes("node_modules/")
+
+// The module specifiers a declaration file names that point outside the
+// package, in order and once each: import and export-from declarations,
+// `import("…")` types and `import x = require("…")`. That is every bare
+// specifier, and every path isBuildPath reports; other relative paths are
+// left out.
 export function externalSpecifiers(text, fileName = "file.d.ts") {
   const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, scriptKind(fileName))
   const found = []
   const add = (node) => {
-    if (node && ts.isStringLiteralLike(node) && !/^\.{0,2}\//.test(node.text) && !found.includes(node.text)) found.push(node.text)
+    if (!node || !ts.isStringLiteralLike(node) || found.includes(node.text)) return
+    if (isBuildPath(node.text) || !/^\.{0,2}\//.test(node.text)) found.push(node.text)
   }
   const visit = (node) => {
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) add(node.moduleSpecifier)
@@ -93,13 +101,18 @@ export function externalSpecifiers(text, fileName = "file.d.ts") {
 // own modules, and not in `pkg`'s peerDependencies or dependencies. A
 // declaration that names a package installed only as a dependency of a peer
 // (@medusajs/types under @medusajs/framework, say) gives a store errors or
-// `any`, depending on where its package manager put it.
+// `any`, depending on where its package manager put it. A build path
+// (isBuildPath) names no package a store could have, so it is listed whole.
 const packageOf = (specifier) => specifier.split("/").slice(0, specifier.startsWith("@") ? 2 : 1).join("/")
 export function undeclaredPackages(specifiers, pkg) {
   const declared = new Set([...Object.keys(pkg.peerDependencies ?? {}), ...Object.keys(pkg.dependencies ?? {})])
   const builtin = new Set(builtinModules)
   const undeclared = []
   for (const specifier of specifiers) {
+    if (isBuildPath(specifier)) {
+      if (!undeclared.includes(specifier)) undeclared.push(specifier)
+      continue
+    }
     if (specifier.startsWith("node:") || builtin.has(packageOf(specifier))) continue
     const name = packageOf(specifier)
     if (!declared.has(name) && !undeclared.includes(name)) undeclared.push(name)
@@ -182,7 +195,11 @@ function main() {
   for (const path of files) {
     if (!/^\.medusa\/server\/.*\.d\.[cm]?ts$/.test(path)) continue
     for (const name of undeclaredPackages(externalSpecifiers(readFileSync(join(root, path), "utf8"), path), pkg)) {
-      problems.push(`declaration names a package that isn't a peer or dependency: ${path}: ${name}`)
+      problems.push(
+        isBuildPath(name)
+          ? `declaration names a path that only resolves where the package was built: ${path}: ${name}`
+          : `declaration names a package that isn't a peer or dependency: ${path}: ${name}`
+      )
     }
   }
 
