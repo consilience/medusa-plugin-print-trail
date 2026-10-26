@@ -18,8 +18,8 @@ import {
 } from "../stock-flow"
 import type { StateStore } from "../team-code"
 import { markWaitingSkus, memoryPreOrderSeen } from "../pre-order"
-import type { SkuCheck } from "../sku-check"
-import { checkColumns, type VariantCheckRow } from "../variant-checks"
+import { checkVariantSkus, type CheckVariant, type SkuCheck, type SkuCheckPort } from "../sku-check"
+import { checkColumns, toSkuCheck, type VariantCheckRow } from "../variant-checks"
 import type { CheckStatusUpdate } from "../../modules/printTrail/service"
 
 const NOW = new Date("2026-10-19T12:00:00Z")
@@ -585,6 +585,128 @@ describe("forgetting variants", () => {
     // The next full run prunes it.
     await runStockSync(ctx, { trigger: "schedule" })
     expect(variantRows.get("v_gone")).toBeUndefined()
+  })
+})
+
+// Full runs bring the stored SKU checks up to date from Print Trail's
+// statuses (API 1.3.0), so the variant page and the notice don't wait for
+// the next save.
+describe("refreshing stored checks", () => {
+  const check = (sku: string, status: SkuCheck["status"]): SkuCheck => ({ sku, status, checked_at: "2026-10-01T00:00:00.000Z" })
+  const statusOf = (id: string) => variantRows.get(id)?.check_status
+
+  beforeEach(() => {
+    mock.state.preOrderRelease = true
+  })
+
+  it("a full run updates statuses that changed at Print Trail", async () => {
+    mock.state.skuStatus["9780000000002"] = "inactive"
+    variantRows.add("v1", "prod_v1", check("9780000000002", "matched"))
+    variantRows.add("v2", "prod_v2", check("9780000000019", "pre-order"))
+    variantRows.add("v3", "prod_v3", check("9780000000026", "matched"))
+    const result = await runStockSync(ctx, { trigger: "schedule" })
+    expect(result.status).toBe("completed")
+    expect(variantRows.get("v1")).toMatchObject({ check_status: "inactive", check_source: "stock-sync", checked_at: NOW })
+    expect(variantRows.get("v2")).toMatchObject({ check_status: "matched", check_source: "stock-sync", check_sku: "9780000000019" })
+    // Unchanged: not written.
+    expect(variantRows.get("v3")).toMatchObject({ check_status: "matched", check_source: "sku-check" })
+    expect(variantRows.queued).toEqual([])
+  })
+
+  it("a SKU missing from stock levels is never downgraded", async () => {
+    variantRows.add("v1", "prod_v1", check("NOT-LISTED-1", "matched"))
+    variantRows.add("v2", "prod_v2", check("NOT-LISTED-2", "pre-order"))
+    await runStockSync(ctx, { trigger: "schedule" })
+    expect([statusOf("v1"), statusOf("v2")]).toEqual(["matched", "pre-order"])
+    expect(variantRows.queued).toEqual([])
+  })
+
+  it("an older API without status changes nothing", async () => {
+    mock.state.preOrderRelease = false
+    mock.state.skuStatus["9780000000002"] = "inactive"
+    variantRows.add("v1", "prod_v1", check("9780000000002", "matched"))
+    variantRows.add("v2", "prod_v2", check("9780000000019", "not-found"))
+    await runStockSync(ctx, { trigger: "schedule" })
+    expect([statusOf("v1"), statusOf("v2")]).toEqual(["matched", "not-found"])
+    expect(variantRows.calls).not.toContain("setCheckStatuses")
+    expect(variantRows.queued).toEqual([])
+  })
+
+  it("a SKU-only run refreshes nothing", async () => {
+    mock.state.skuStatus["9780000000002"] = "inactive"
+    variantRows.add("v1", "prod_v1", check("9780000000002", "matched"))
+    await runStockSync(ctx, { trigger: "shortfall", skus: ["9780000000002"] })
+    expect(statusOf("v1")).toBe("matched")
+    expect(variantRows.calls).toEqual([])
+  })
+
+  it("a check changed since it was read is skipped", async () => {
+    mock.state.skuStatus["9780000000002"] = "inactive"
+    variantRows.add("v1", "prod_v1", check("9780000000002", "matched"))
+    // The SKU check writes a new check between the read and the update.
+    const original = variantRows.setCheckStatuses.bind(variantRows)
+    variantRows.setCheckStatuses = async (updates) => {
+      Object.assign(variantRows.get("v1")!, checkColumns(check("9780000000002", "pre-order"), "sku-check"))
+      return original(updates)
+    }
+    await runStockSync(ctx, { trigger: "schedule" })
+    expect(variantRows.get("v1")).toMatchObject({ check_status: "pre-order", check_source: "sku-check" })
+  })
+
+  it("a refresh failure is logged and the run completes", async () => {
+    mock.state.skuStatus["9780000000002"] = "inactive"
+    variantRows.add("v1", "prod_v1", check("9780000000002", "matched"))
+    variantRows.failNext("setCheckStatuses")
+    const result = await runStockSync(ctx, { trigger: "schedule" })
+    expect(result.status).toBe("completed")
+    expect(warnings.join("\n")).toMatch(/setCheckStatuses broke/)
+    expect(statusOf("v1")).toBe("matched")
+    // The next full run catches up.
+    await runStockSync(ctx, { trigger: "schedule" })
+    expect(statusOf("v1")).toBe("inactive")
+  })
+
+  it("a not-found SKU now listed is cleared and queued, and the SKU check then re-sends its blocked order", async () => {
+    variantRows.add("v1", "prod_v1", check("9780000000002", "not-found"))
+    variantRows.add("v2", "prod_v2", check("9780000000019", "inactive"))
+    await runStockSync(ctx, { trigger: "schedule" })
+    // Cleared for a re-check: the SKU check makes the change and its follow-ups.
+    expect(variantRows.get("v1")).toMatchObject({ check_status: null, check_sku: null, check_source: "stock-sync" })
+    expect(variantRows.get("v2")).toMatchObject({ check_status: null, check_source: "stock-sync" })
+    expect(variantRows.queued).toEqual(["v1", "v2"])
+
+    // The sweep's SKU check of the queued variants, over the same rows.
+    const resends: { orderId: string; sequence: number }[] = []
+    const refreshed: string[][] = []
+    const port: SkuCheckPort = {
+      ptProfileIds: async () => [PT],
+      loadVariants: async ({ variantIds }) =>
+        catalogue.variants
+          .filter((v) => variantIds?.includes(v.id))
+          .map((v): CheckVariant => {
+            const r = variantRows.get(v.id)
+            return { id: v.id, sku: v.sku, metadata: null, profileId: v.profileId, productId: `prod_${v.id}`, check: toSkuCheck(r), hasRow: !!r }
+          }),
+      writeCheck: async (v, c) => {
+        Object.assign(variantRows.get(v.id)!, checkColumns(c, "sku-check"))
+      },
+      blockedRows: async () => [{ id: "ptord_1", order_id: "order_1", sequence: 1, unmatchedSkus: ["9780000000002"] }],
+      orderVariants: async () => [{ orderId: "order_1", canceled: false, variantIds: ["v1"] }],
+      resend: async (orderId, sequence) => {
+        resends.push({ orderId, sequence })
+      },
+    }
+    const outcome = await checkVariantSkus(
+      { client: ctx.client as PrintTrailClient, state, port, now: () => NOW, refreshStock: async (skus) => void refreshed.push(skus) },
+      { variantIds: variantRows.queued }
+    )
+    expect(outcome.checked.map((c) => [c.variantId, c.check.status])).toEqual([
+      ["v1", "matched"],
+      ["v2", "matched"],
+    ])
+    expect(statusOf("v1")).toBe("matched")
+    expect(resends).toEqual([{ orderId: "order_1", sequence: 1 }])
+    expect(refreshed).toEqual([["9780000000002", "9780000000019"]])
   })
 })
 

@@ -1,4 +1,6 @@
+import type { PtStockLevel } from "../modules/printTrail/client/types"
 import type { SkuCheck, SkuCheckStatus } from "./sku-check"
+import { normaliseSku } from "./sku"
 
 // A variant's SKU check lives in the plugin's print_trail_variant table, one
 // row per checked variant. Before 1.0.0 it was kept in the variant's metadata
@@ -84,4 +86,46 @@ export function storedCheck(
   metadata: Record<string, unknown> | null | undefined
 ): SkuCheck | null {
   return row ? toSkuCheck(row) : legacyCheckOf(metadata)
+}
+
+// What the SKU check would store for Print Trail's status (API 1.3.0), or
+// null when the status is missing or unknown.
+const wantedStatus = (status: unknown): SkuCheckStatus | null =>
+  status === "active" ? "matched" : status === "inactive" ? "inactive" : status === "pre-order" ? "pre-order" : null
+
+const LIVE: readonly string[] = ["matched", "pre-order"]
+
+export type CheckRefreshes = {
+  // A status the stock sync can write itself: between matched and pre-order,
+  // or to inactive. `expect` is the check as read, so one changed since is
+  // left alone.
+  set: { id: string; expect: { sku: string | null; status: string }; status: SkuCheckStatus }[]
+  // A check that becomes matched or pre-order from inactive, not-found or
+  // error: cleared and queued, so the SKU check makes the change and its
+  // follow-ups (re-sending blocked orders, refreshing stock).
+  recheck: { id: string; variantId: string; expect: { sku: string | null; status: string } }[]
+}
+
+// The stored checks the stock sync's statuses (statusBySku) say are out of
+// date. Each row is looked up by its matched_sku, then its own SKU. A row
+// whose SKU isn't listed (never downgraded on absence), whose listed status
+// is missing or unknown, or whose check is no-sku or cleared, is left alone.
+export function checkRefreshes(rows: VariantCheckRow[], statuses: Map<string, PtStockLevel>): CheckRefreshes {
+  const out: CheckRefreshes = { set: [], recheck: [] }
+  for (const row of rows) {
+    const stored = row.check_status
+    if (!isSkuCheckStatus(stored) || stored === "no-sku") continue
+    const level =
+      (row.check_matched_sku ? statuses.get(normaliseSku(row.check_matched_sku)) : undefined) ??
+      (row.check_sku ? statuses.get(normaliseSku(row.check_sku)) : undefined)
+    const wanted = wantedStatus(level?.status)
+    if (!wanted || wanted === stored) continue
+    const expect = { sku: row.check_sku, status: stored }
+    if (wanted === "inactive" || LIVE.includes(stored)) {
+      out.set.push({ id: row.id, expect, status: wanted })
+    } else {
+      out.recheck.push({ id: row.id, variantId: row.variant_id, expect })
+    }
+  }
+  return out
 }

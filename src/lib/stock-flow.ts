@@ -13,6 +13,7 @@ import {
   METADATA_SCAN_PAGES,
   planStockSync,
   STATE_KEYS,
+  statusBySku,
   STOCK_FAILURE_CAP,
   type Backordered,
   type BackorderReason,
@@ -23,7 +24,7 @@ import {
   type Watermark,
 } from "./stock"
 import type { StateStore } from "./team-code"
-import type { VariantCheckRow } from "./variant-checks"
+import { checkRefreshes, type VariantCheckRow } from "./variant-checks"
 
 // The stock sync's step logic over small ports: Print Trail's stock levels in,
 // Medusa inventory levels and backorder flags out. The workflow takes the
@@ -372,6 +373,37 @@ function backorderedRecord(tracked: Set<string>, reasons: Record<string, Backord
   return { ids, reasons: Object.fromEntries(ids.filter((id) => reasons[id]).map((id) => [id, reasons[id]])) }
 }
 
+// A full run's statuses (API 1.3.0) bring the stored SKU checks up to date
+// (checkRefreshes): a status the run can write itself is written; a check
+// that becomes matched or pre-order from inactive, not-found or error is
+// cleared and queued for the SKU check, which the sweep drains. Rows without
+// a status (an older Print Trail API) change nothing. A failure is logged;
+// the run still completes.
+export async function refreshStoredChecks(ctx: StockContext, levels: PtStockLevel[]): Promise<void> {
+  if (!levels.some((l) => l && typeof l === "object" && "status" in l)) return
+  try {
+    const statuses = statusBySku(levels)
+    const at = ctx.now ? ctx.now() : new Date()
+    let after: string | null = null
+    for (;;) {
+      const rows = await ctx.variants.rowPage(after, VARIANT_ROW_PAGE)
+      if (!rows.length) return
+      const { set, recheck } = checkRefreshes(rows, statuses)
+      if (set.length) await ctx.variants.setCheckStatuses(set.map((u) => ({ ...u, at })))
+      if (recheck.length) {
+        await ctx.variants.setCheckStatuses(recheck.map((r) => ({ id: r.id, expect: r.expect, status: null, at })))
+        // A check changed since it was read is queued too: the SKU check
+        // finds it current and skips it.
+        await ctx.variants.queueChecks(recheck.map((r) => r.variantId))
+      }
+      if (rows.length < VARIANT_ROW_PAGE) return
+      after = rows[rows.length - 1].id
+    }
+  } catch (e) {
+    ctx.logger?.warn(`Print Trail stock sync: couldn't bring the stored SKU checks up to date: ${message(e)}; trying again with the next full sync`)
+  }
+}
+
 // Under the lock. Returns results; only a state-store error throws.
 export async function runStockSync(ctx: StockContext, input: StockSyncInput): Promise<StockSyncResult> {
   const now = () => (ctx.now ? ctx.now() : new Date())
@@ -511,6 +543,7 @@ export async function runStockSync(ctx: StockContext, input: StockSyncInput): Pr
         ctx.logger?.warn(`Print Trail stock sync: couldn't read the Print Trail products: ${message(e)}; SKU checks are pruned with the next full sync`)
       }
       if (ptProducts) await pruneVariantRows(ctx, ptProducts)
+      await refreshStoredChecks(ctx, levels)
       await scanPluginMetadata(ctx, { inScope, tracked, startedAt: new Date(startedAt) })
     }
   } catch (e) {

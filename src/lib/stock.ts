@@ -190,6 +190,23 @@ type Candidate = {
   levels: StockVariant["inventory"][0]["levels"]
 }
 
+// Normalised SKU → the row whose status counts: the figure's row (the SKU's
+// first with a usable figure), else the SKU's first (a status holds without
+// a usable figure).
+export function statusBySku(levels: PtStockLevel[]): Map<string, PtStockLevel> {
+  const withFigure = new Map<string, PtStockLevel>()
+  for (const row of levels) {
+    const k = normaliseSku(row?.sku)
+    if (k && !withFigure.has(k) && figureOf(row.stock) !== null) withFigure.set(k, row)
+  }
+  const statusRow = new Map<string, PtStockLevel>()
+  for (const row of levels) {
+    const k = normaliseSku(row?.sku)
+    if (k && !statusRow.has(k)) statusRow.set(k, withFigure.get(k) ?? row)
+  }
+  return statusRow
+}
+
 // `tracked` is the plugin's own record of the backorders it switched on
 // (stock_backordered's ids). Only those are ever switched off, and a store's
 // own backorder (on, untracked) is never claimed.
@@ -216,13 +233,7 @@ export function planStockSync(input: {
     }
   }
   for (const k of pt.keys()) unknownKeys.delete(k)
-  // The row whose status counts: the figure's row, else the SKU's first
-  // (a status holds without a usable figure).
-  const statusRow = new Map<string, PtStockLevel>()
-  for (const row of input.levels) {
-    const k = normaliseSku(row?.sku)
-    if (k && !statusRow.has(k)) statusRow.set(k, rowOf.get(k) ?? row)
-  }
+  const statusRow = statusBySku(input.levels)
   const hasStatus = input.levels.some((l) => l && typeof l === "object" && "status" in l)
   const only = input.onlySkus ? new Set(input.onlySkus.map(normaliseSku)) : null
   const locations = input.stockLocationIds?.length ? new Set(input.stockLocationIds) : null

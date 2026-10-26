@@ -7,6 +7,7 @@ import {
   readUnmatchedSkus,
   shortfallSkus,
   STATE_KEYS,
+  statusBySku,
   stockFigure,
   type StockVariant,
 } from "../stock"
@@ -304,6 +305,23 @@ describe("planStockSync", () => {
     })
     expect(plan.levelUpdates).toEqual([{ inventory_item_id: "iitem_v1", location_id: "sloc_a", stocked_quantity: 2 }])
     expect(plan.matched).toEqual(["abc-1"])
+  })
+})
+
+describe("statusBySku", () => {
+  it("picks the figure's row, else the SKU's first", () => {
+    const statuses = statusBySku([
+      { sku: " sku-a ", stock: null as unknown as number, status: "inactive" },
+      { sku: "SKU-A", stock: 4, status: "active" },
+      { sku: "SKU-B", stock: "" as unknown as number, status: "pre-order" },
+      { sku: "sku-b", stock: null as unknown as number, status: "active" },
+      { sku: null, stock: 5, status: "active" },
+    ])
+    expect([...statuses.keys()]).toEqual(["sku-a", "sku-b"])
+    // The figure's row counts, as planStockSync reads it.
+    expect(statuses.get("sku-a")?.status).toBe("active")
+    // No usable figure: the SKU's first row.
+    expect(statuses.get("sku-b")?.status).toBe("pre-order")
   })
 })
 
