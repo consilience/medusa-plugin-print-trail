@@ -1,0 +1,453 @@
+// Pre-order products against the mock's API 1.3.0 behaviour
+// (preOrderRelease on).
+import path from "node:path"
+import { medusaIntegrationTestRunner } from "@medusajs/test-utils"
+import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { updateProductVariantsWorkflow } from "@medusajs/medusa/core-flows"
+import { HARNESS, PRE_ORDER_DATE, PRE_ORDER_MOCK, SKUS, useMock } from "./harness"
+import { adminHeaders, type Headers } from "./helpers/admin"
+import { runJob, stockJob as runStockJob, webhookStockRun as waitForWebhookStockRun } from "./helpers/jobs"
+import { CONFIRMS, eventsFor, printTrail, requests, rowFor } from "./helpers/rows"
+import { seedStore, settleSkuChecks, type Seed } from "./helpers/seed"
+import { placeOrder } from "./helpers/store"
+import { waitFor } from "./helpers/wait"
+
+jest.setTimeout(120_000)
+
+const mock = useMock(PRE_ORDER_MOCK)
+const HOOK = `${HARNESS.backendUrl}/hooks/print-trail`
+
+medusaIntegrationTestRunner({
+  cwd: path.join(__dirname, "app"),
+  testSuite: ({ api, getContainer, utils }) => {
+    let seed: Seed
+    let admin: Headers
+    const container = () => getContainer()
+    const job = (name: "print-trail-sweep" | "print-trail-reconcile" | "print-trail-stock-sync") =>
+      runJob(container(), name, utils.waitWorkflowExecutions)
+
+    const stockJob = () => runStockJob(container(), utils.waitWorkflowExecutions)
+    const webhookStockRun = (before: string | undefined) => waitForWebhookStockRun(container(), before, utils.waitWorkflowExecutions)
+
+    const confirmedOrder = async (lines: { variantId: string; quantity: number }[]) => {
+      const { orderId } = await placeOrder(api, seed, lines)
+      const row = await waitFor(async () => {
+        const r = await rowFor(container(), orderId)
+        return r?.confirmed_at ? r : undefined
+      }, { what: "a confirmed row" })
+      return { orderId, row }
+    }
+
+    const medusaOrder = async (orderId: string) => {
+      const query = container().resolve(ContainerRegistrationKeys.QUERY)
+      const { data } = await query.graph({
+        entity: "order",
+        fields: ["id", "status", "fulfillments.id", "fulfillments.shipped_at"],
+        filters: { id: orderId },
+      })
+      return data[0] as any
+    }
+
+    const variantOf = async (variantId: string) => {
+      const query = container().resolve(ContainerRegistrationKeys.QUERY)
+      const { data } = await query.graph({
+        entity: "variant",
+        fields: [
+          "id",
+          "allow_backorder",
+          "metadata",
+          "inventory_items.inventory.location_levels.stocked_quantity",
+          "inventory_items.inventory.location_levels.reserved_quantity",
+          "inventory_items.inventory.location_levels.location_id",
+        ],
+        filters: { id: variantId },
+      })
+      const v = data[0] as any
+      const level = v.inventory_items[0].inventory.location_levels.find((l: any) => l.location_id === seed.stockLocationId)
+      return {
+        stocked: Number(level?.stocked_quantity),
+        reserved: Number(level?.reserved_quantity ?? 0),
+        allowBackorder: v.allow_backorder as boolean,
+        marker: (v.metadata ?? {}).print_trail_backorder as unknown,
+        // 0.1.1: the store-facing flag.
+        preOrder: (v.metadata ?? {}).print_trail_pre_order as unknown,
+        metadata: (v.metadata ?? {}) as Record<string, unknown>,
+      }
+    }
+
+    // The per-parcel emails of one order, oldest first.
+    const shipmentEmails = async (orderId: string) => {
+      const all = await container().resolve(Modules.NOTIFICATION).listNotifications({ template: "print-trail-shipment" })
+      return (all as any[]).filter((n) => n.data?.order?.id === orderId).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)))
+    }
+
+    const rowWhere = (orderId: string, what: string, test: (r: any) => boolean) =>
+      waitFor(async () => {
+        const r = await rowFor(container(), orderId)
+        return r && test(r) ? r : undefined
+      }, { what })
+
+    // Dispatch one Print Trail fulfilment and tell the store.
+    const ship = async (uuid: string, index: number) => {
+      mock().dispatch(uuid, index)
+      expect((await mock().sendWebhook("fulfilment-status-updated", uuid)).status).toBe(202)
+    }
+
+    beforeAll(async () => {
+      seed = await seedStore(container())
+      admin = await adminHeaders(container())
+    })
+
+    beforeEach(async () => {
+      mock().state.preOrderRelease = true
+      mock().state.webhookUrl = HOOK
+      await stockJob()
+    })
+
+    it("a pre-order order is sent at checkout, waits, is released and completes", async () => {
+      const { orderId, row } = await confirmedOrder([{ variantId: seed.variants.preOrder, quantity: 1 }])
+      expect(requests(mock(), "PUT", CONFIRMS)).toHaveLength(1)
+      expect(row.attention).toBeNull()
+      const { data: view } = await api.get(`/admin/print-trail/orders/${orderId}`, admin)
+      expect(view.rows[0].fulfilments).toEqual([
+        expect.objectContaining({ status: "back-order", back_order: "pre-order", publication_date: PRE_ORDER_DATE }),
+      ])
+      expect(view.rows[0].cancel_warning).toBeNull()
+
+      mock().state.stock[SKUS.preOrder] = 5
+      await mock().setSkuStatus(SKUS.preOrder, "active")
+      // Print Trail's shape: released back to draft on a re-queued order, with
+      // confirmedAt kept and nothing at the warehouse yet.
+      const released = await rowWhere(orderId, "the released fulfilment", (r) => r.fulfilments?.[0]?.status === "draft")
+      expect(released).toMatchObject({ status: "queued", attention: null })
+      expect(released.fulfilments[0]).toMatchObject({ backOrderReason: null, sentToWarehouseAt: null })
+      expect(released.confirmed_at).toBeTruthy()
+      // The countdown ends: the warehouse accepts it.
+      mock().sendToWarehouse(row.pt_uuid, 0)
+      expect((await mock().sendWebhook("fulfilment-status-updated", row.pt_uuid)).status).toBe(202)
+      await rowWhere(orderId, "the fulfilment at the warehouse", (r) => r.fulfilments?.[0]?.status === "processing")
+      await ship(row.pt_uuid, 0)
+      const done = await waitFor(async () => {
+        const o = await medusaOrder(orderId)
+        return o.status === "completed" ? o : undefined
+      }, { what: "the order completed" })
+      expect(done.fulfillments).toHaveLength(1)
+      expect(done.fulfillments[0].shipped_at).toBeTruthy()
+      expect((await rowFor(container(), orderId)).attention).toBeNull()
+    })
+
+    it("a mixed order ships its in-stock parcel and waits for the rest", async () => {
+      const { orderId, row } = await confirmedOrder([
+        { variantId: seed.variants.pt, quantity: 1 },
+        { variantId: seed.variants.preOrder, quantity: 1 },
+      ])
+      const pt = mock().state.orders.get(row.pt_uuid)
+      const inStock = pt.fulfilments.findIndex((f: any) => f.status === "processing")
+      const waiting = pt.fulfilments.findIndex((f: any) => f.status === "back-order")
+      expect([inStock, waiting].sort()).toEqual([0, 1])
+
+      await ship(row.pt_uuid, inStock)
+      const first = await waitFor(async () => {
+        const o = await medusaOrder(orderId)
+        return o.fulfillments?.length === 1 && o.fulfillments[0].shipped_at ? o : undefined
+      }, { what: "the in-stock parcel shipped" })
+      await utils.waitWorkflowExecutions()
+      expect((await medusaOrder(orderId)).status).not.toBe("completed")
+      expect((await rowFor(container(), orderId)).attention).toBeNull()
+      void first
+
+      mock().state.stock[SKUS.preOrder] = 2
+      await mock().setSkuStatus(SKUS.preOrder, "active")
+      await rowWhere(orderId, "the released part", (r) => r.fulfilments?.[waiting]?.status === "processing")
+      await ship(row.pt_uuid, waiting)
+      await waitFor(async () => (await medusaOrder(orderId)).status === "completed", { what: "the order completed" })
+      expect((await medusaOrder(orderId)).fulfillments).toHaveLength(2)
+
+      // 0.1.1: the released parcel's email is the pre-order one; the
+      // in-stock parcel's is ordinary.
+      const emails = await waitFor(async () => {
+        const e = await shipmentEmails(orderId)
+        return e.length === 2 ? e : undefined
+      }, { what: "two shipment emails" })
+      const byParcel = (index: number) => {
+        const fulfilment = mock().state.orders.get(row.pt_uuid).fulfilments[index]
+        const tracking = fulfilment.trackingDetails[0].trackingNumber
+        return emails.find((e: any) => e.data.tracking.some((t: any) => t.number === tracking))
+      }
+      expect(byParcel(inStock).data).toMatchObject({ pre_order: false })
+      expect(byParcel(waiting).data).toMatchObject({ pre_order: true })
+      expect((await rowFor(container(), orderId)).pre_order_fulfilments).toContain(pt.fulfilments[waiting].uuid)
+    })
+
+    it("the stock sync writes the store-facing pre-order flag", async () => {
+      // beforeEach's run: the date, beside the backorder marker.
+      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ preOrder: PRE_ORDER_DATE, marker: "pre-order", allowBackorder: true })
+      expect((await variantOf(seed.variants.pt)).preOrder).toBeUndefined()
+      // No publication date at Print Trail: true.
+      delete mock().state.publicationDate[SKUS.preOrder]
+      await stockJob()
+      expect((await variantOf(seed.variants.preOrder)).preOrder).toBe(true)
+      // A limited pre-order: flagged, with no plugin backorder.
+      mock().state.publicationDate[SKUS.preOrder] = "2027-02-01"
+      mock().state.preOrderLimit = { [SKUS.preOrder]: 5 }
+      await stockJob()
+      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ preOrder: "2027-02-01", allowBackorder: false, stocked: 5 })
+      // Live at Print Trail: the stock event's sync deletes it, keeping the
+      // variant's other keys.
+      await updateProductVariantsWorkflow(container()).run({
+        input: { product_variants: [{ id: seed.variants.preOrder, metadata: { ...(await variantOf(seed.variants.preOrder)).metadata, store_key: "kept" } }] },
+      })
+      mock().state.stock[SKUS.preOrder] = 4
+      await mock().setSkuStatus(SKUS.preOrder, "active")
+      const live = await waitFor(async () => {
+        const v = await variantOf(seed.variants.preOrder)
+        return v.preOrder === undefined ? v : undefined
+      }, { what: "the flag deleted" })
+      expect(live.metadata).toMatchObject({ store_key: "kept" })
+      // Back on pre-order with no date: true again. (The mock's changedAt
+      // has whole seconds, so this second event can fall to the watermark;
+      // the job stands in for it.)
+      await mock().setSkuStatus(SKUS.preOrder, "pre-order", null)
+      await stockJob()
+      expect((await variantOf(seed.variants.preOrder)).preOrder).toBe(true)
+    })
+
+    // The README's storefront read. From 2.21 a store route silently drops a
+    // field that isn't on its allowed list, and `variants.metadata` isn't
+    // there; the default `*variants` returns it anyway.
+    it("the store's product and cart routes return the pre-order flag", async () => {
+      const h = { headers: { "x-publishable-api-key": seed.publishableKey } }
+      const flagOf = async (fields?: string) => {
+        const query = fields ? `&fields=${encodeURIComponent(fields)}` : ""
+        const { data } = await api.get(`/store/products?handle=harness-preorder${query}`, h)
+        return data.products[0].variants[0].metadata?.print_trail_pre_order
+      }
+      expect(await flagOf()).toBe(PRE_ORDER_DATE)
+      expect(await flagOf("+variants.metadata")).toBe(PRE_ORDER_DATE)
+      expect(await flagOf("id,title,*variants")).toBe(PRE_ORDER_DATE)
+      const {
+        data: { cart },
+      } = await api.post("/store/carts", { region_id: seed.regionId, items: [{ variant_id: seed.variants.preOrder, quantity: 1 }] }, h)
+      const { data } = await api.get(`/store/carts/${cart.id}?fields=${encodeURIComponent("*items.variant")}`, h)
+      expect(data.cart.items[0].variant.metadata?.print_trail_pre_order).toBe(PRE_ORDER_DATE)
+    })
+
+    it("the stock sync keeps a 0-stock pre-order purchasable", async () => {
+      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ stocked: 0, allowBackorder: true, marker: "pre-order" })
+      // A store cart for it completes at 0 stock.
+      const { orderId } = await placeOrder(api, seed, [{ variantId: seed.variants.preOrder, quantity: 1 }])
+      await rowWhere(orderId, "the confirmed row", (r) => !!r.confirmed_at)
+
+      // Live at Print Trail with 5 in stock: one stock-level-updated, and no
+      // stock job run by the test.
+      mock().state.stock[SKUS.preOrder] = 5
+      await mock().setSkuStatus(SKUS.preOrder, "active")
+      await waitFor(async () => {
+        const v = await variantOf(seed.variants.preOrder)
+        return !v.allowBackorder && v.stocked === 5 ? v : undefined
+      }, { what: "backorders off at stock 5" })
+      expect((await variantOf(seed.variants.preOrder)).marker).toBeUndefined()
+    })
+
+    it("a limited pre-order's level adds back Medusa's reservation", async () => {
+      mock().state.preOrderLimit = { [SKUS.preOrder]: 5 }
+      const { completedAt: before } = await stockJob()
+      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ stocked: 5, reserved: 0, allowBackorder: false })
+      // Medusa reserves 1; Print Trail's remaining drops to 4, and its
+      // stock-level-updated runs a full sync.
+      await confirmedOrder([{ variantId: seed.variants.preOrder, quantity: 1 }])
+      await webhookStockRun(before)
+      expect(mock().state.requests.filter((r) => r.path.endsWith("/stock-levels")).length).toBeGreaterThan(0)
+      const v = await variantOf(seed.variants.preOrder)
+      expect(v).toMatchObject({ stocked: 5, reserved: 1 })
+      // Medusa's availability is what remains of the limit.
+      expect(v.stocked - v.reserved).toBe(4)
+      await stockJob()
+      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ stocked: 5, reserved: 1 })
+    })
+
+    it("a store's own backorder flag is left alone", async () => {
+      // The store turned backorders on itself (its own pre-order feature)
+      // and the plugin doesn't track it.
+      const service = printTrail(container())
+      await service.setState("stock_backordered", { ids: [] })
+      await updateProductVariantsWorkflow(container()).run({
+        input: { product_variants: [{ id: seed.variants.preOrder, allow_backorder: true, metadata: { print_trail_backorder: "" } }] },
+      })
+      await stockJob()
+      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ allowBackorder: true })
+      expect((await variantOf(seed.variants.preOrder)).marker).toBeFalsy()
+      // Never claimed, still flagged for the store.
+      expect((await variantOf(seed.variants.preOrder)).preOrder).toBe(PRE_ORDER_DATE)
+
+      mock().state.stock[SKUS.preOrder] = 3
+      await mock().setSkuStatus(SKUS.preOrder, "active")
+      await waitFor(async () => (await variantOf(seed.variants.preOrder)).stocked === 3, { what: "the webhook's sync" })
+      await stockJob()
+      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ allowBackorder: true, stocked: 3 })
+      expect((await variantOf(seed.variants.preOrder)).preOrder).toBeUndefined()
+    })
+
+    it("a confirm into an out-of-stock back-order is attention, not a retry loop", async () => {
+      mock().state.backorderWarehouse = true
+      // Medusa can still sell one; Print Trail has none.
+      mock().state.stock[SKUS.ptZero] = 0
+      const { orderId } = await placeOrder(api, seed, [{ variantId: seed.variants.ptZero, quantity: 1 }])
+      const row = await rowWhere(orderId, "back-order attention", (r) => r.attention === "pt-fulfilment-back-order")
+      expect(row).toMatchObject({ pending_action: null, shortfall: null })
+      expect(row.confirmed_at).toBeTruthy()
+      expect(requests(mock(), "PUT", CONFIRMS)).toHaveLength(1)
+      await job("print-trail-sweep")
+      await job("print-trail-sweep")
+      expect(requests(mock(), "PUT", CONFIRMS)).toHaveLength(1)
+      // The SKU-only stock refresh.
+      await waitFor(async () => (await variantOf(seed.variants.ptZero)).stocked === 0, { what: "ptZero at 0 in Medusa" })
+      expect((await eventsFor(container(), orderId)).map((e) => e.message)).toContain(
+        `Print Trail accepted the order with a back-order: ${SKUS.ptZero} out of stock`
+      )
+    })
+
+    it("a product going live without stock shows as a back-order within one sweep", async () => {
+      const { orderId, row } = await confirmedOrder([{ variantId: seed.variants.preOrder, quantity: 1 }])
+      expect(row.attention).toBeNull()
+      const before = mock().state.requests.length
+      // Live with no stock: Print Trail sends only stock-level-updated.
+      await mock().setSkuStatus(SKUS.preOrder, "active")
+      await rowWhere(orderId, "a refetch queued by the stock event", (r) => r.pending_action === "refetch")
+      await job("print-trail-sweep")
+      const flagged = await rowWhere(orderId, "back-order attention", (r) => r.attention === "pt-fulfilment-back-order")
+      expect(flagged.fulfilments[0].backOrderReason).toBe("out-of-stock")
+      const messages = (await eventsFor(container(), orderId)).map((e) => e.message)
+      expect(messages.some((m) => /is now out of stock \(the product went live before its stock arrived\)$/.test(m))).toBe(true)
+      // No reconcile poll was needed.
+      expect(mock().state.requests.slice(before).some((r) => r.method === "GET" && /\/orders\?/.test(r.path))).toBe(false)
+    })
+
+    it("a SKU that went pre-order after the last stock run is still re-read on activation", async () => {
+      // The stock run in beforeEach saw pt2 active, so only the confirm (and
+      // the sync) can record it as seen on pre-order.
+      mock().state.skuStatus[SKUS.pt2] = "pre-order"
+      const { orderId, row } = await confirmedOrder([{ variantId: seed.variants.pt2, quantity: 1 }])
+      expect(row.attention).toBeNull()
+      expect(row.fulfilments[0]).toMatchObject({ status: "back-order", backOrderReason: "pre-order" })
+      expect(await printTrail(container()).preOrderSeen([SKUS.pt2])).toEqual([SKUS.pt2])
+      // Live with no stock: only stock-level-updated.
+      mock().state.stock[SKUS.pt2] = 0
+      await mock().setSkuStatus(SKUS.pt2, "active")
+      await rowWhere(orderId, "a refetch queued by the stock event", (r) => r.pending_action === "refetch")
+      await job("print-trail-sweep")
+      await rowWhere(orderId, "back-order attention", (r) => r.attention === "pt-fulfilment-back-order")
+    })
+
+    // Print Trail keeps it held as pre-order until the product goes active;
+    // only stock-level-updated says so.
+    it("a product set inactive while an order waits shows on the order, as dismissable attention", async () => {
+      const { orderId } = await confirmedOrder([{ variantId: seed.variants.preOrder, quantity: 1 }])
+      mock().state.stock[SKUS.preOrder] = 5
+      await mock().setSkuStatus(SKUS.preOrder, "inactive")
+      await rowWhere(orderId, "a refetch queued by the stock event", (r) => r.pending_action === "refetch")
+      await job("print-trail-sweep")
+      const flagged = await rowWhere(orderId, "inactive-product attention", (r) => r.attention === "pt-pre-order-inactive")
+      expect(flagged.fulfilments[0]).toMatchObject({ status: "back-order", backOrderReason: "pre-order" })
+      const { data: view } = await api.get(`/admin/print-trail/orders/${orderId}`, admin)
+      expect(view.rows[0].fulfilments[0]).toMatchObject({ back_order: "pre-order", product_inactive: true })
+      expect(view.rows[0].actions.dismiss).toBe(true)
+      // Active again: released, and the attention goes.
+      await mock().setSkuStatus(SKUS.preOrder, "active")
+      await rowWhere(orderId, "the released fulfilment", (r) => r.fulfilments?.[0]?.status === "draft" && r.attention === null)
+    })
+
+    // No order webhook and no updatedAt change, so reconcile never sees it.
+    it("an out-of-stock back-order whose product goes back on pre-order clears within one sweep", async () => {
+      mock().state.backorderWarehouse = true
+      mock().state.stock[SKUS.ptZero] = 0
+      const { orderId } = await placeOrder(api, seed, [{ variantId: seed.variants.ptZero, quantity: 1 }])
+      await rowWhere(orderId, "back-order attention", (r) => r.attention === "pt-fulfilment-back-order")
+      await mock().setSkuStatus(SKUS.ptZero, "pre-order")
+      await rowWhere(orderId, "a refetch queued by the stock event", (r) => r.pending_action === "refetch")
+      await job("print-trail-sweep")
+      const cleared = await rowWhere(orderId, "the attention cleared", (r) => r.attention === null && r.fulfilments?.[0]?.backOrderReason === "pre-order")
+      expect(cleared.fulfilments[0].status).toBe("back-order")
+      expect((await eventsFor(container(), orderId)).map((e) => e.message)).toContainEqual(
+        expect.stringMatching(/is waiting for the pre-order release again \(its product is no longer active\)$/)
+      )
+    })
+
+    it("the settings page reports the API version", async () => {
+      const version = await waitFor(async () => {
+        const { data } = await api.get("/admin/print-trail/connection", admin)
+        return data.api_version?.version ? data.api_version : undefined
+      }, { what: "the stored API version" })
+      expect(version.version).toBe("1.3.0")
+    })
+
+    // 0.1.x on Medusa 2.19+ left a deleted key out of the write, which
+    // Medusa's merge kept, then forgot the variant. The first full sync after
+    // the upgrade deletes the keys in scope and, through its one-off scan,
+    // outside it, and leaves the backorder flag and other keys alone.
+    it("the first full stock sync deletes stale keys from 0.1.x", async () => {
+      const service = printTrail(container())
+      const stale = [seed.variants.pt, seed.variants.plain]
+      for (const key of ["stock_backordered", "pre_order_flagged"]) {
+        const ids: string[] = (await service.getState(key))?.ids ?? []
+        await service.setState(key, { ids: ids.filter((id) => !stale.includes(id)) })
+      }
+      // beforeEach's run has done the scan.
+      expect(await service.getState("variant_metadata_scan")).toBeTruthy()
+      await service.setState("variant_metadata_scan", null)
+      for (const id of stale) {
+        await updateProductVariantsWorkflow(container()).run({
+          input: {
+            product_variants: [
+              {
+                id,
+                metadata: { ...(await variantOf(id)).metadata, store_key: "kept", print_trail_backorder: true, print_trail_pre_order: "2020-01-01" },
+              },
+            ],
+          },
+        })
+        expect(await variantOf(id)).toMatchObject({ marker: true, preOrder: "2020-01-01", allowBackorder: false })
+      }
+      // The saves' SKU checks, so none writes over the sync.
+      await settleSkuChecks(container())
+
+      await stockJob()
+      for (const id of stale) {
+        const v = await variantOf(id)
+        expect(v).toMatchObject({ marker: undefined, preOrder: undefined, allowBackorder: false })
+        expect(v.metadata).toMatchObject({ store_key: "kept" })
+      }
+      // One short page read every variant.
+      expect(await service.getState("variant_metadata_scan")).toMatchObject({
+        after: expect.any(String),
+        preOrderFields: 1,
+        markers: 1,
+        completedAt: expect.any(String),
+      })
+      // The pre-order variant keeps its own.
+      expect(await variantOf(seed.variants.preOrder)).toMatchObject({ preOrder: PRE_ORDER_DATE })
+    })
+
+    // The harness has fewer variants than a page, so the scan above never
+    // sends the cursor. Paging one variant at a time checks the id $gt
+    // filter and the id order on the real database.
+    it("the metadata scan's pages follow the cursor on Postgres", async () => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { listPluginMetadata } = require(path.resolve(__dirname, "../../.medusa/server/src/workflows/steps/stock-context.js"))
+      const query = container().resolve(ContainerRegistrationKeys.QUERY)
+      const { data } = await query.graph({ entity: "product_variant", fields: ["id"], pagination: { order: { id: "ASC" } } })
+      const all = (data as { id: string }[]).map((v) => v.id)
+      expect(all.length).toBeGreaterThan(2)
+      const read: string[] = []
+      let after: string | null = null
+      // Bounded, so a filter that's ignored fails instead of looping.
+      for (let i = 0; i <= all.length; i++) {
+        const page: { lastId: string | null; read: number } = await listPluginMetadata(query, after, 1)
+        if (!page.read) break
+        read.push(page.lastId!)
+        after = page.lastId
+      }
+      expect(read).toEqual(all)
+    })
+  },
+})

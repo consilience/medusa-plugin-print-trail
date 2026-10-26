@@ -1,0 +1,56 @@
+name: Staging smoke
+
+# By hand only: Actions → Staging smoke → Run workflow, with confirm ticked.
+# Never on push or pull requests.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Run against Print Trail staging (creates and cancels CI-<run id>-* orders)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: staging
+    steps:
+      - name: Require confirmation
+        if: ${{ !inputs.confirm }}
+        run: |
+          echo "::error::Tick 'confirm' to run the staging smoke test."
+          exit 1
+      - name: Require the staging secrets
+        env:
+          PT_STAGING_BASE_URL: ${{ secrets.PRINT_TRAIL_STAGING_BASE_URL }}
+          PT_STAGING_CHANNEL_ID: ${{ secrets.PRINT_TRAIL_STAGING_CHANNEL_ID }}
+          PT_STAGING_API_TOKEN: ${{ secrets.PRINT_TRAIL_STAGING_API_TOKEN }}
+          PT_STAGING_SKUS: ${{ secrets.PRINT_TRAIL_STAGING_SKUS }}
+        run: |
+          for v in PT_STAGING_BASE_URL PT_STAGING_CHANNEL_ID PT_STAGING_API_TOKEN PT_STAGING_SKUS; do
+            if [ -z "${!v}" ]; then echo "::error::$v is empty: set the staging environment's secrets"; exit 1; fi
+          done
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Staging smoke
+        env:
+          PT_STAGING_BASE_URL: ${{ secrets.PRINT_TRAIL_STAGING_BASE_URL }}
+          PT_STAGING_CHANNEL_ID: ${{ secrets.PRINT_TRAIL_STAGING_CHANNEL_ID }}
+          PT_STAGING_API_TOKEN: ${{ secrets.PRINT_TRAIL_STAGING_API_TOKEN }}
+          PT_STAGING_SKUS: ${{ secrets.PRINT_TRAIL_STAGING_SKUS }}
+          CI_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: npm run test:staging
