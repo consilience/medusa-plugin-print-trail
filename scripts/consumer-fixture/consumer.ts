@@ -74,7 +74,7 @@ export async function syncNow(container: MedusaContainer): Promise<string> {
   return result.status
 }
 
-// A workflow hook, as in the README.
+// A workflow hook, registered as a store would.
 sendOrderToPrintTrailWorkflow.hooks.payload(async ({ order, payload }) =>
   new StepResponse({ payload: { ...payload, purchaseOrder: String(order.metadata?.po_number ?? "") || undefined } })
 )

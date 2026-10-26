@@ -226,7 +226,7 @@ medusaIntegrationTestRunner({
       expect((await variantOf(seed.variants.preOrder)).preOrder).toBe(true)
     })
 
-    // The README's storefront read. From 2.21 a store route silently drops a
+    // A storefront's read of the flag. From 2.21 a store route silently drops a
     // field that isn't on its allowed list, and `variants.metadata` isn't
     // there; the default `*variants` returns it anyway.
     it("the store's product and cart routes return the pre-order flag", async () => {

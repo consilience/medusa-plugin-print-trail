@@ -4,6 +4,13 @@ All notable changes to `medusa-plugin-print-trail` are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 package uses [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **The README is short.** It says what the plugin does, what it needs and how to set it up. The full guide is on docs.printtrail.com, at [docs.printtrail.com/channels/medusa](https://docs.printtrail.com/channels/medusa/): the options, rate cards, pre-orders, notifications, the developer reference and troubleshooting. The README no longer lists Print Trail API versions.
+- The hint under a shipping option's per-country bands points at the plugin's guide on docs.printtrail.com instead of the README.
+
 ## [1.0.0] - 2026-10-26
 
 **Upgrading from 0.2.0 (and 0.1.x).** From 0.1.x, first follow 0.2.0's upgrade note below (the package was renamed). Then:
