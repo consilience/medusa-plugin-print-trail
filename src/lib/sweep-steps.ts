@@ -5,10 +5,12 @@ export type SweepSteps = {
   missedOrders(): Promise<void>
   pendingStock(): Promise<void>
   skuChecks(): Promise<void>
+  // With the stock sync off: the one-off scan of variant metadata.
+  legacyMetadata(): Promise<void>
 }
 
 export async function runSweepSteps(steps: SweepSteps, logger: { error(msg: string): void }): Promise<void> {
-  const order: (keyof SweepSteps)[] = ["dueRetries", "missedOrders", "pendingStock", "skuChecks"]
+  const order: (keyof SweepSteps)[] = ["dueRetries", "missedOrders", "pendingStock", "skuChecks", "legacyMetadata"]
   for (const name of order) {
     try {
       await steps[name]()

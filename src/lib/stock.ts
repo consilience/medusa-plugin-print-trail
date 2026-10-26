@@ -33,6 +33,7 @@ export const STATE_KEYS = {
   skuCheckFollowUps: "sku_check_follow_ups",
   // The backorders the plugin turned on (Backordered): only those are ever
   // switched off, and each one's reason is shown on the variant page.
+  // Written only under the stock lock (the stock sync and its metadata scan).
   backordered: "stock_backordered",
   // Consecutive failed runs: after STOCK_FAILURE_CAP the sweep stops retrying.
   failures: "stock_failures",
@@ -43,7 +44,8 @@ export const STATE_KEYS = {
   // leaves Print Trail's profiles loses it: { ids }.
   preOrderFlagged: "pre_order_flagged",
   // The one-off scan of every variant's metadata for the plugin's keys,
-  // spread over full runs: its cursor and counts (MetadataScan, stock-flow.ts).
+  // spread over full runs (or sweeps, with the stock sync off): its version,
+  // cursor and counts (MetadataScan, stock-flow.ts).
   metadataScan: "variant_metadata_scan",
 } as const
 // Where 0.2.0 and earlier kept the backorder's reason, in variant metadata.
@@ -71,7 +73,7 @@ export type BackorderReason = "print-on-demand" | "pre-order"
 // stock_backordered. `ids` is the only authority for which backorders the
 // plugin may switch off ("only turn off what the plugin turned on");
 // `reasons` maps each id to why, for display. A record from 0.2.0 has no
-// `reasons`. Written only by the stock sync, under the stock lock.
+// `reasons`. Written only under the stock lock.
 export type Backordered = { ids: string[]; reasons?: Record<string, BackorderReason> }
 
 // The legacy marker's value: `true` for print-on-demand, "pre-order" for a

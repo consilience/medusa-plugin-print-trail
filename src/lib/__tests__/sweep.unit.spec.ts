@@ -1,3 +1,6 @@
+import { resolvePluginOptions } from "../../config"
+import { STATE_KEYS } from "../stock"
+import { runLegacyMetadataScan, type StockContext } from "../stock-flow"
 import { runSweepSteps } from "../sweep-steps"
 import { dueCancels, dueRows, findOrdersMissingRows, ordersMissingCancel, sweepWindow, withinLookback } from "../sweep"
 
@@ -66,11 +69,15 @@ describe("runSweepSteps", () => {
         },
         skuChecks: async () => {
           ran.push("sku")
+          throw new Error("sku boom")
+        },
+        legacyMetadata: async () => {
+          ran.push("legacy")
         },
       },
       { error: (m: string) => errors.push(m) }
     )
-    expect(ran).toEqual(["due", "missed", "stock", "sku"])
+    expect(ran).toEqual(["due", "missed", "stock", "sku", "legacy"])
     expect(errors.join("\n")).toMatch(/boom/)
   })
 })
@@ -122,5 +129,75 @@ describe("withinLookback", () => {
     expect(withinLookback("2026-10-13T12:00:00Z", now, 7)).toBe(true)
     expect(withinLookback("2026-10-12T11:59:59Z", now, 7)).toBe(false)
     expect(withinLookback(null, now, 7)).toBe(false)
+  })
+})
+
+// With the stock sync off, no full run ever scans: the sweep moves the old
+// keys out of variant metadata instead, under the stock lock.
+describe("runLegacyMetadataScan", () => {
+  const setup = (opts: { stockSync: boolean; scan?: unknown; held?: boolean }) => {
+    const values = new Map<string, unknown>(opts.scan ? [[STATE_KEYS.metadataScan, opts.scan]] : [])
+    const pages: unknown[] = []
+    const lock: { acquired: unknown[]; released: unknown[] } = { acquired: [], released: [] }
+    const ctx = {
+      state: {
+        getState: async (key: string) => values.get(key) ?? null,
+        setState: async (key: string, value: unknown) => void values.set(key, value),
+      },
+      options: resolvePluginOptions({ stockSync: { enabled: opts.stockSync } }),
+      now: () => NOW,
+      logger: { warn: () => {}, error: () => {} },
+      catalogue: {
+        listPluginMetadata: async (after: string | null, take: number) => {
+          pages.push([after, take])
+          return { found: [], lastId: null, read: 0 }
+        },
+        deleteLegacyKeys: async () => {},
+      },
+      variants: { adopt: async () => 0 },
+    } as unknown as StockContext
+    const locking = {
+      acquire: async (key: string | string[], o?: unknown) => {
+        if (opts.held) throw new Error(`Failed to acquire lock for key "${key}"`)
+        lock.acquired.push([key, o])
+      },
+      release: async (key: string | string[]) => {
+        lock.released.push(key)
+        return true
+      },
+    }
+    return { ctx, locking, values, pages, lock }
+  }
+
+  it("runs the scan only with stock sync off, under the stock lock", async () => {
+    const on = setup({ stockSync: true })
+    await runLegacyMetadataScan(on.locking, on.ctx)
+    expect(on.pages).toEqual([])
+    expect(on.lock.acquired).toEqual([])
+
+    const off = setup({ stockSync: false })
+    await runLegacyMetadataScan(off.locking, off.ctx)
+    expect(off.lock.acquired).toEqual([["print-trail:stock", expect.objectContaining({ expire: 900 })]])
+    expect(off.lock.released).toEqual(["print-trail:stock"])
+    expect(off.pages).toEqual([[null, 500]])
+    expect(off.values.get(STATE_KEYS.metadataScan)).toMatchObject({ version: 2, completedAt: NOW.toISOString() })
+  })
+
+  it("does nothing once a version 2 scan has completed", async () => {
+    const done = setup({ stockSync: false, scan: { version: 2, after: "v1", completedAt: NOW.toISOString() } })
+    await runLegacyMetadataScan(done.locking, done.ctx)
+    expect(done.lock.acquired).toEqual([])
+    expect(done.pages).toEqual([])
+    // A completed 0.2.0 scan isn't enough.
+    const old = setup({ stockSync: false, scan: { after: "v1", completedAt: NOW.toISOString() } })
+    await runLegacyMetadataScan(old.locking, old.ctx)
+    expect(old.pages).toEqual([[null, 500]])
+  })
+
+  it("skips it when the lock is held, until the next sweep", async () => {
+    const held = setup({ stockSync: false, held: true })
+    await runLegacyMetadataScan(held.locking, held.ctx)
+    expect(held.pages).toEqual([])
+    expect(held.values.get(STATE_KEYS.metadataScan)).toBeUndefined()
   })
 })

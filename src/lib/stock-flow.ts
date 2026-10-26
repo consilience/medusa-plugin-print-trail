@@ -1,7 +1,9 @@
+import type { ILockingModule } from "@medusajs/framework/types"
 import type { PrintTrailPluginOptions } from "../config"
 import type { PrintTrailClient } from "../modules/printTrail/client/client"
 import type { PtStockLevel } from "../modules/printTrail/client/types"
-import type { SkuCheckStatus } from "./sku-check"
+import { withHeldLock } from "./reconcile"
+import type { SkuCheck, SkuCheckStatus } from "./sku-check"
 import { readPreOrders, type PreOrderSeenStore, type PreOrderSku } from "./pre-order"
 import { normaliseSku } from "./sku"
 import {
@@ -15,6 +17,8 @@ import {
   STATE_KEYS,
   statusBySku,
   STOCK_FAILURE_CAP,
+  STOCK_LOCK_KEY,
+  STOCK_LOCK_TTL_SECONDS,
   type Backordered,
   type BackorderReason,
   type PreOrderField,
@@ -52,9 +56,11 @@ export type StockCatalogue = {
   // Writes metadata.print_trail_pre_order (PRE_ORDER_FIELD_KEY); null deletes
   // it. A variant whose stored value already matches is left alone.
   setPreOrderFields(updates: { id: string; value: PreOrderField | null }[]): Promise<void>
-  // Deletes the print_trail_backorder marker alone, where the variant still
-  // has it; allow_backorder isn't written.
-  clearBackorderMarkers(variantIds: string[]): Promise<void>
+  // The metadata scan's one write per variant: deletes print_trail_sku_check
+  // and print_trail_backorder wherever present, and print_trail_pre_order
+  // too where `preOrderField` is set. A variant whose current metadata has
+  // none of them isn't written; allow_backorder never is.
+  deleteLegacyKeys(variants: { id: string; preOrderField: boolean }[]): Promise<void>
   // One page of the metadata scan: up to `take` variants with ids after
   // `after` (null: from the first), by id ascending.
   listPluginMetadata(after: string | null, take: number): Promise<MetadataPage>
@@ -74,12 +80,25 @@ export type VariantRowStore = {
   ): Promise<number>
   // Queues these variants for the SKU check (drained by the sweep).
   queueChecks(variantIds: string[]): Promise<void>
+  // Legacy checks from variant metadata, created only where the variant has
+  // no row. Returns how many were created.
+  adopt(checks: { variantId: string; productId: string; check: SkuCheck }[]): Promise<number>
 }
 
-export type PluginMetadata = { id: string; preOrderField: unknown; backorderMarker: BackorderReason | null }
+export type PluginMetadata = {
+  id: string
+  productId: string
+  preOrderField: unknown
+  // readBackorderMarker(print_trail_backorder) and legacyCheckOf(metadata).
+  backorderMarker: BackorderReason | null
+  check: SkuCheck | null
+  // Carries print_trail_sku_check or print_trail_backorder, whatever its value.
+  legacyKeys: boolean
+}
 
 export type MetadataPage = {
-  // The page's variants that carry print_trail_pre_order or the marker.
+  // The page's variants that carry print_trail_pre_order or a key 0.2.0
+  // kept in metadata.
   found: PluginMetadata[]
   // The last id the page read, matched or not; null when it read none.
   lastId: string | null
@@ -237,15 +256,18 @@ async function writePreOrderFields(ctx: StockContext, plan: StockPlan, inScope: 
 const message = (e: unknown) => String((e as Error)?.message ?? e).slice(0, ERROR_LIMIT)
 
 // variant_metadata_scan, written whole after every page (setState replaces
-// the stored value).
+// the stored value). Version 2 (1.0.0) also moves the SKU check and the
+// backorder marker out of metadata; any other record starts again.
 export type MetadataScan = {
+  version: 2
   // The cursor: the last variant id read, ids ascending; null before the
   // first page.
   after: string | null
-  // Variants read, and keys deleted, so far.
+  // Variants read, keys deleted and checks adopted, so far.
   scanned: number
   preOrderFields: number
   markers: number
+  checks: number
   startedAt: string
   updatedAt: string
   // Set when a page came back short: every variant has been read.
@@ -260,42 +282,66 @@ export const METADATA_SCAN_LIMITS: MetadataScanLimits = {
   deadlineMs: METADATA_SCAN_DEADLINE_MS,
 }
 
-// What the run that calls the scan knows, all from under its lock.
-export type MetadataScanRun = { inScope: Set<string>; tracked: Set<string>; startedAt: Date }
+// What the run that calls the scan knows, all from under the stock lock.
+// null: unknown (the sweep's run). inScope: the stock run's own-stock
+// variants; ptProducts: the products in Print Trail's profiles. The scan
+// reads stock_backordered itself, never a run's copy.
+export type MetadataScanRun = { inScope: Set<string> | null; ptProducts: Set<string> | null; startedAt: Date }
 
 const count = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? n : 0)
 
-// Where the stored scan stands: "done", or the record to continue from (a
-// fresh one when there is none). A record with no cursor, such as the
-// unreleased first 0.2.0 build's { at } (its offset pages could skip a
-// variant), starts again from the first variant.
+// Where the stored scan stands: "done", or the record to continue from. A
+// record that isn't version 2 (none, 0.2.0's, done or not, or the
+// unreleased first 0.2.0 build's { at }) starts again from the first variant.
 function resumeScan(stored: Partial<MetadataScan> | null, now: Date): MetadataScan | "done" {
-  if (stored?.completedAt) return "done"
   const at = now.toISOString()
+  if (stored?.version !== 2) {
+    return { version: 2, after: null, scanned: 0, preOrderFields: 0, markers: 0, checks: 0, startedAt: at, updatedAt: at, completedAt: null }
+  }
+  if (stored.completedAt) return "done"
   return {
-    after: typeof stored?.after === "string" ? stored.after : null,
-    scanned: count(stored?.scanned),
-    preOrderFields: count(stored?.preOrderFields),
-    markers: count(stored?.markers),
-    startedAt: stored?.startedAt ?? at,
-    updatedAt: stored?.updatedAt ?? at,
+    version: 2,
+    after: typeof stored.after === "string" ? stored.after : null,
+    scanned: count(stored.scanned),
+    preOrderFields: count(stored.preOrderFields),
+    markers: count(stored.markers),
+    checks: count(stored.checks),
+    startedAt: stored.startedAt ?? at,
+    updatedAt: stored.updatedAt ?? at,
     completedAt: null,
   }
 }
 
-// Once, spread over full runs until it has read every variant. Before 0.2.0,
-// on Medusa 2.19+ (which merges variant metadata), a delete kept the key and
-// the plugin then forgot the variant, so a variant that has since left the
-// run's scope can't be found from the state rows. Every variant is read once:
-// outside the scope, print_trail_pre_order is deleted, and an untracked
-// variant's backorder marker.
+const scanDone = (stored: Partial<MetadataScan> | null) => stored?.version === 2 && !!stored.completedAt
+
+// Once, spread over full runs (or sweeps, with the stock sync off) until it
+// has read every variant. Up to 0.2.0 the plugin kept a variant's SKU check
+// (print_trail_sku_check) and its backorder's reason (print_trail_backorder)
+// in the variant's metadata, which store routes return; and before 0.2.0, on
+// Medusa 2.19+ (which merges variant metadata), a delete kept a key and the
+// plugin then forgot the variant, so a variant that has since left the run's
+// scope can't be found from the state rows. Every variant is read once, and
+// per page, in order:
+//
+// 1. Each legacy check of a variant in Print Trail's profiles (all, when
+//    they're unknown) is copied into a print_trail_variant row, unless the
+//    variant has one.
+// 2. Each tracked variant with a marker and no recorded reason gets the
+//    marker's reason in stock_backordered (read afresh, under the lock).
+// 3. One write per variant deletes both keys wherever present, and
+//    print_trail_pre_order outside a known scope (inside it the run keeps it
+//    right). allow_backorder is never written.
+// 4. The cursor is stored.
+//
+// When every variant has been read, sku_check_unmatched goes: the rows'
+// not-found checks are the notice now.
 //
 // The stock lock isn't renewed, so a run reads at most limits.maxPages pages
 // and starts none once it is limits.deadlineMs old, measured from the run's
 // start. Each page is read by id after the cursor (keyset, so a variant
-// deleted behind it can't make the scan skip one), its keys are deleted
-// against this run's scope and tracking, and only then is the cursor
-// stored. A failure is logged; the next full run retries that page.
+// deleted behind it can't make the scan skip one), and the cursor is stored
+// only after the page's writes. A failure is logged; the next run retries
+// that page.
 export async function scanPluginMetadata(
   ctx: StockContext,
   run: MetadataScanRun,
@@ -314,22 +360,37 @@ export async function scanPluginMetadata(
         return
       }
       const { found, lastId, read } = await ctx.catalogue.listPluginMetadata(scan.after, limits.pageSize)
-      const outside = found.filter((v) => !run.inScope.has(v.id))
-      const fields = outside
-        .filter((v) => v.preOrderField !== undefined && v.preOrderField !== null)
-        .map((v) => ({ id: v.id, value: null }))
-      const markers = outside.filter((v) => v.backorderMarker !== null && !run.tracked.has(v.id)).map((v) => v.id)
-      if (fields.length) await ctx.catalogue.setPreOrderFields(fields)
-      if (markers.length) await ctx.catalogue.clearBackorderMarkers(markers)
+
+      // 1. Adopted before the key is deleted, so a failure loses no check.
+      const adoptable = found.filter((v) => v.check && (!run.ptProducts || run.ptProducts.has(v.productId)))
+      const adopted = adoptable.length
+        ? await ctx.variants.adopt(adoptable.map((v) => ({ variantId: v.id, productId: v.productId, check: v.check! })))
+        : 0
+
+      // 2. Only a reason the record lacks: a recorded one is newer.
+      const marked = found.filter((v) => v.backorderMarker !== null)
+      if (marked.length) await recordMarkerReasons(ctx, marked)
+
+      // 3.
+      const outside = (v: PluginMetadata) =>
+        run.inScope !== null && !run.inScope.has(v.id) && v.preOrderField !== undefined && v.preOrderField !== null
+      const deletes = found.filter((v) => v.legacyKeys || outside(v)).map((v) => ({ id: v.id, preOrderField: outside(v) }))
+      if (deletes.length) await ctx.catalogue.deleteLegacyKeys(deletes)
+
+      // 4.
       const at = now().toISOString()
+      const completed = read < limits.pageSize
+      if (completed) await ctx.state.setState(STATE_KEYS.skuCheckUnmatched, null)
       scan = {
+        version: 2,
         after: lastId ?? scan.after,
         scanned: scan.scanned + read,
-        preOrderFields: scan.preOrderFields + fields.length,
-        markers: scan.markers + markers.length,
+        preOrderFields: scan.preOrderFields + deletes.filter((d) => d.preOrderField).length,
+        markers: scan.markers + marked.length,
+        checks: scan.checks + adopted,
         startedAt: scan.startedAt,
         updatedAt: at,
-        completedAt: read < limits.pageSize ? at : null,
+        completedAt: completed ? at : null,
       }
       await ctx.state.setState(STATE_KEYS.metadataScan, scan)
       if (scan.completedAt) return
@@ -337,6 +398,40 @@ export async function scanPluginMetadata(
   } catch (e) {
     ctx.logger?.warn(`Print Trail stock sync: couldn't check variant metadata for stale keys: ${message(e)}; trying again with the next full sync`)
   }
+}
+
+// The legacy marker's reason for each tracked variant whose reason isn't
+// recorded (a 0.2.0 record has none). Untracked markers are stale: no reason.
+async function recordMarkerReasons(ctx: StockContext, marked: PluginMetadata[]): Promise<void> {
+  const stored = await ctx.state.getState<Backordered>(STATE_KEYS.backordered)
+  if (!stored?.ids?.length) return
+  const tracked = new Set(stored.ids)
+  const reasons: Record<string, BackorderReason> = { ...(stored.reasons ?? {}) }
+  let changed = false
+  for (const v of marked) {
+    if (tracked.has(v.id) && !reasons[v.id]) {
+      reasons[v.id] = v.backorderMarker!
+      changed = true
+    }
+  }
+  if (changed) await ctx.state.setState(STATE_KEYS.backordered, backorderedRecord(tracked, reasons))
+}
+
+// With the stock sync off, no full run ever scans, so the sweep runs the
+// scan until it completes, with the scope unknown: print_trail_pre_order is
+// left, and every legacy check is adopted. It takes the stock lock (no other
+// writer of stock_backordered can run meanwhile); a held lock skips it until
+// the next sweep.
+export async function runLegacyMetadataScan(
+  locking: Pick<ILockingModule, "acquire" | "release">,
+  ctx: StockContext
+): Promise<void> {
+  if (ctx.options.stockSync.enabled) return
+  if (scanDone(await ctx.state.getState<Partial<MetadataScan>>(STATE_KEYS.metadataScan))) return
+  await withHeldLock(locking, STOCK_LOCK_KEY, STOCK_LOCK_TTL_SECONDS, async () => {
+    const startedAt = ctx.now ? ctx.now() : new Date()
+    await scanPluginMetadata(ctx, { inScope: null, ptProducts: null, startedAt })
+  })
 }
 
 export const VARIANT_ROW_PAGE = 500
@@ -544,7 +639,9 @@ export async function runStockSync(ctx: StockContext, input: StockSyncInput): Pr
       }
       if (ptProducts) await pruneVariantRows(ctx, ptProducts)
       await refreshStoredChecks(ctx, levels)
-      await scanPluginMetadata(ctx, { inScope, tracked, startedAt: new Date(startedAt) })
+      // Last: it writes stock_backordered, which nothing after it in this run
+      // writes (only unmatched_skus, the run record and the watermark).
+      await scanPluginMetadata(ctx, { inScope, ptProducts, startedAt: new Date(startedAt) })
     }
   } catch (e) {
     const error = message(e)

@@ -6,6 +6,7 @@ import { resolveSku } from "../../lib/sku"
 import { LEGACY_BACKORDER_MARKER_KEY, PRE_ORDER_FIELD_KEY, readBackorderMarker, type StockVariant } from "../../lib/stock"
 import { SKU_CHECK_QUEUE_PREFIX } from "../../lib/sku-check-queue"
 import type { MetadataPage, PluginMetadata, StockCatalogue, StockContext } from "../../lib/stock-flow"
+import { LEGACY_SKU_CHECK_KEY, legacyCheckOf } from "../../lib/variant-checks"
 import { installedMetadataUpdateMode, patchVariantMetadata, type VariantMetadataStore } from "../../lib/variant-metadata"
 import { PRINT_TRAIL_MODULE } from "../../modules/printTrail"
 import type PrintTrailModuleService from "../../modules/printTrail/service"
@@ -161,19 +162,25 @@ export function preOrderFieldPatches(updates: { id: string; value: string | true
   }))
 }
 
-// The stale marker alone: "" deletes it, and allow_backorder isn't written.
-// Skipped when the variant no longer has the key.
-export function staleMarkerPatches(variantIds: string[]) {
-  return variantIds.map((id) => ({
-    id,
-    metadata: { [LEGACY_BACKORDER_MARKER_KEY]: "" },
-    when: (current: Record<string, unknown> | null) => current?.[LEGACY_BACKORDER_MARKER_KEY] !== undefined,
-  }))
+// The metadata scan's one write per variant: "" deletes the keys 0.2.0
+// kept in metadata, and print_trail_pre_order too where `preOrderField` is
+// set; allow_backorder isn't written. Skipped when the variant's current
+// metadata (re-read just before) has none of them.
+export function legacyKeyPatches(variants: { id: string; preOrderField: boolean }[]) {
+  return variants.map(({ id, preOrderField }) => {
+    const keys = [LEGACY_SKU_CHECK_KEY, LEGACY_BACKORDER_MARKER_KEY, ...(preOrderField ? [PRE_ORDER_FIELD_KEY] : [])]
+    return {
+      id,
+      metadata: Object.fromEntries(keys.map((k) => [k, ""])),
+      when: (current: Record<string, unknown> | null) => keys.some((k) => current?.[k] !== undefined),
+    }
+  })
 }
 
 // One page of the metadata scan: up to `take` variants (soft-deleted ones
-// excluded) with ids after `after`, by id ascending; only those carrying one
-// of the stock sync's keys are kept. Keyset rather than offset, so a variant
+// excluded) with ids after `after`, by id ascending; only those carrying
+// print_trail_pre_order, print_trail_backorder or print_trail_sku_check are
+// kept. Keyset rather than offset, so a variant
 // deleted from a page already read can't shift an unread one behind the
 // next page's start. Postgres both compares and orders the ids, so the two
 // agree. No skip, so Query calls the module's list, with no count.
@@ -184,17 +191,25 @@ export async function listPluginMetadata(
 ): Promise<MetadataPage> {
   const { data } = await query.graph({
     entity: "product_variant",
-    fields: ["id", "metadata"],
+    fields: ["id", "product_id", "metadata"],
     ...(after === null ? {} : { filters: { id: { $gt: after } } }),
     pagination: { take, order: { id: "ASC" } },
   })
-  const rows = data as { id: string; metadata?: Record<string, unknown> | null }[]
+  const rows = data as { id: string; product_id: string; metadata?: Record<string, unknown> | null }[]
   const found: PluginMetadata[] = []
   for (const v of rows) {
-    const preOrderField = v.metadata?.[PRE_ORDER_FIELD_KEY]
-    const backorderMarker = readBackorderMarker(v.metadata?.[LEGACY_BACKORDER_MARKER_KEY])
-    if ((preOrderField !== undefined && preOrderField !== null) || backorderMarker !== null) {
-      found.push({ id: v.id, preOrderField, backorderMarker })
+    const metadata = v.metadata ?? null
+    const preOrderField = metadata?.[PRE_ORDER_FIELD_KEY]
+    const legacyKeys = metadata?.[LEGACY_BACKORDER_MARKER_KEY] !== undefined || metadata?.[LEGACY_SKU_CHECK_KEY] !== undefined
+    if ((preOrderField !== undefined && preOrderField !== null) || legacyKeys) {
+      found.push({
+        id: v.id,
+        productId: v.product_id,
+        preOrderField,
+        backorderMarker: readBackorderMarker(metadata?.[LEGACY_BACKORDER_MARKER_KEY]),
+        check: legacyCheckOf(metadata),
+        legacyKeys,
+      })
     }
   }
   return { found, lastId: rows.length ? rows[rows.length - 1].id : null, read: rows.length }
@@ -260,9 +275,9 @@ export function buildStockCatalogue(container: MedusaContainer): StockCatalogue 
         await patchVariantMetadata(metadata, preOrderFieldPatches(updates.slice(i, i + VARIANT_CHUNK)))
       }
     },
-    async clearBackorderMarkers(variantIds) {
-      for (let i = 0; i < variantIds.length; i += VARIANT_CHUNK) {
-        await patchVariantMetadata(metadata, staleMarkerPatches(variantIds.slice(i, i + VARIANT_CHUNK)))
+    async deleteLegacyKeys(variants) {
+      for (let i = 0; i < variants.length; i += VARIANT_CHUNK) {
+        await patchVariantMetadata(metadata, legacyKeyPatches(variants.slice(i, i + VARIANT_CHUNK)))
       }
     },
     listPluginMetadata: (after, take) => listPluginMetadata(query, after, take),
@@ -283,6 +298,7 @@ export async function buildStockContext(container: MedusaContainer): Promise<Sto
       forget: (filter) => service.forgetVariants(filter),
       setCheckStatuses: (updates) => service.setCheckStatuses(updates),
       queueChecks: (ids) => service.queueStateKeys(SKU_CHECK_QUEUE_PREFIX, ids),
+      adopt: (checks) => service.adoptVariantChecks(checks),
     },
   }
 }

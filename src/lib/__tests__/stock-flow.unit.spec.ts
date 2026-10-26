@@ -19,7 +19,7 @@ import {
 import type { StateStore } from "../team-code"
 import { markWaitingSkus, memoryPreOrderSeen } from "../pre-order"
 import { checkVariantSkus, type CheckVariant, type SkuCheck, type SkuCheckPort } from "../sku-check"
-import { checkColumns, toSkuCheck, type VariantCheckRow } from "../variant-checks"
+import { checkColumns, LEGACY_SKU_CHECK_KEY, legacyCheckOf, toSkuCheck, type VariantCheckRow } from "../variant-checks"
 import type { CheckStatusUpdate } from "../../modules/printTrail/service"
 
 const NOW = new Date("2026-10-19T12:00:00Z")
@@ -35,9 +35,10 @@ class MemoryState implements StateStore {
   }
 }
 
-// A variant as the fake stores it: what loadVariants returns, plus the
-// legacy backorder marker in its metadata (only the metadata scan reads it).
-type FakeVariant = StockVariant & { backorderMarker: BackorderReason | null }
+// A variant as the fake stores it: what loadVariants returns, plus the keys
+// 0.2.0 kept in its metadata, which only the metadata scan reads: the
+// backorder marker and the SKU check (any value).
+type FakeVariant = StockVariant & { backorderMarker: BackorderReason | null; skuCheck?: unknown }
 
 class FakeCatalogue implements StockCatalogue {
   calls: { method: string; args: unknown[] }[] = []
@@ -58,7 +59,7 @@ class FakeCatalogue implements StockCatalogue {
   }
   async loadVariants(ids: string[]) {
     this.check("loadVariants", [ids])
-    return JSON.parse(JSON.stringify(this.variants.map(({ backorderMarker: _marker, ...v }) => v))) as StockVariant[]
+    return JSON.parse(JSON.stringify(this.variants.map(({ backorderMarker: _marker, skuCheck: _check, ...v }) => v))) as StockVariant[]
   }
   async updateLevels(updates: StockPlan["levelUpdates"]) {
     this.check("updateLevels", [updates])
@@ -85,9 +86,15 @@ class FakeCatalogue implements StockCatalogue {
       if (u) v.preOrderField = u.value ?? undefined
     }
   }
-  async clearBackorderMarkers(ids: string[]) {
-    this.check("clearBackorderMarkers", [ids])
-    for (const v of [...this.variants, ...this.outside]) if (ids.includes(v.id)) v.backorderMarker = null
+  async deleteLegacyKeys(updates: { id: string; preOrderField: boolean }[]) {
+    this.check("deleteLegacyKeys", [updates])
+    for (const u of updates) {
+      const v = [...this.variants, ...this.outside].find((x) => x.id === u.id)
+      if (!v) continue
+      v.backorderMarker = null
+      v.skuCheck = undefined
+      if (u.preOrderField) v.preOrderField = undefined
+    }
   }
   // Each variant's product (prod_{id} unless set), and the variants Medusa
   // no longer has (deleted without an event): never live.
@@ -118,10 +125,18 @@ class FakeCatalogue implements StockCatalogue {
       .filter((v) => after === null || v.id > after)
       .slice(0, take)
     this.onPage?.(++this.pages)
+    const legacyKeys = (v: FakeVariant) => v.backorderMarker !== null || v.skuCheck !== undefined
     return {
       found: rows
-        .filter((v) => (v.preOrderField !== undefined && v.preOrderField !== null) || v.backorderMarker !== null)
-        .map((v) => ({ id: v.id, preOrderField: v.preOrderField, backorderMarker: v.backorderMarker })),
+        .filter((v) => (v.preOrderField !== undefined && v.preOrderField !== null) || legacyKeys(v))
+        .map((v) => ({
+          id: v.id,
+          productId: this.product(v.id),
+          preOrderField: v.preOrderField,
+          backorderMarker: v.backorderMarker,
+          check: legacyCheckOf({ [LEGACY_SKU_CHECK_KEY]: v.skuCheck }),
+          legacyKeys: legacyKeys(v),
+        })),
       lastId: rows.length ? rows[rows.length - 1].id : null,
       read: rows.length,
     }
@@ -138,6 +153,9 @@ class FakeCatalogue implements StockCatalogue {
   }
   fieldWrites() {
     return this.calls.filter((c) => c.method === "setPreOrderFields").map((c) => c.args[0])
+  }
+  legacyDeletes() {
+    return this.calls.filter((c) => c.method === "deleteLegacyKeys").map((c) => c.args[0])
   }
   level(id: string, loc = "sloc_a") {
     return this.variants.find((v) => v.id === id)!.inventory[0].levels.find((l) => l.locationId === loc)!.stockedQuantity
@@ -195,6 +213,17 @@ class MemoryVariantRows {
   async queueChecks(ids: string[]) {
     this.hit("queueChecks")
     for (const id of ids) if (!this.queued.includes(id)) this.queued.push(id)
+  }
+  // Creates only the missing rows; a row written meanwhile wins.
+  async adopt(checks: { variantId: string; productId: string; check: SkuCheck }[]) {
+    this.hit("adopt")
+    let created = 0
+    for (const c of checks) {
+      if (this.get(c.variantId)) continue
+      this.rows.push({ id: `ptvar_${c.variantId}`, variant_id: c.variantId, product_id: c.productId, ...checkColumns(c.check, "metadata") })
+      created++
+    }
+    return created
   }
 }
 
@@ -1023,15 +1052,22 @@ describe("stale keys from 0.1.x on Medusa 2.19+", () => {
     await runStockSync(ctx, { trigger: "schedule" })
     expect(gone).toMatchObject({ allowBackorder: false, backorderMarker: null, preOrderField: undefined })
     expect(own).toMatchObject({ allowBackorder: true, backorderMarker: null })
-    expect(catalogue.fieldWrites()).toContainEqual([{ id: "v8", value: null }])
+    expect(catalogue.legacyDeletes()).toEqual([
+      [
+        { id: "v8", preOrderField: true },
+        { id: "v9", preOrderField: false },
+      ],
+    ])
     // One short page: v1, v10, v2, v3, v4, v8, v9 by id.
     expect(catalogue.scanPages()).toEqual([[null, 500]])
     const at = NOW.toISOString()
     expect(state.values.get(STATE_KEYS.metadataScan)).toEqual({
+      version: 2,
       after: "v9",
       scanned: 7,
       preOrderFields: 1,
       markers: 2,
+      checks: 0,
       startedAt: at,
       updatedAt: at,
       completedAt: at,
@@ -1059,6 +1095,17 @@ describe("stale keys from 0.1.x on Medusa 2.19+", () => {
     expect(state.values.get(STATE_KEYS.metadataScan)).toMatchObject({ preOrderFields: 1, markers: 0, completedAt: NOW.toISOString() })
   })
 
+  it("the scan's reasons outlast the run that calls it", async () => {
+    // A 0.2.0 record: v6 is tracked, without a reason, and Print Trail lists
+    // its SKU without a figure, so the run doesn't decide it.
+    mock.state.stock["UNKNOWN-FIG"] = null as unknown as number
+    catalogue.variants.push(variant("v6", "UNKNOWN-FIG", { allowBackorder: true, backorderMarker: "pre-order" }))
+    await state.setState(STATE_KEYS.backordered, { ids: ["v6"] })
+    await runStockSync(ctx, { trigger: "schedule" })
+    expect(catalogue.get("v6")).toMatchObject({ allowBackorder: true, backorderMarker: null })
+    expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v3", "v6"], reasons: { v3: "print-on-demand", v6: "pre-order" } })
+  })
+
   it("the scan's deadline counts from the run's start, not its own", async () => {
     catalogue.outside.push(variant("v8", "OWN-1", { profileId: "sp_default", preOrderField: true }))
     // The run's main work takes 301 s.
@@ -1079,7 +1126,7 @@ describe("the variant metadata scan", () => {
   let clock: number
   const run = (over: Partial<MetadataScanRun> = {}): MetadataScanRun => ({
     inScope: new Set(),
-    tracked: new Set(),
+    ptProducts: null,
     startedAt: new Date(clock),
     ...over,
   })
@@ -1112,13 +1159,23 @@ describe("the variant metadata scan", () => {
       ["v2", 2],
       ["v4", 2],
     ])
-    expect(catalogue.fieldWrites()).toContainEqual([
-      { id: "v3", value: null },
-      { id: "v4", value: null },
+    expect(catalogue.legacyDeletes()).toContainEqual([
+      { id: "v3", preOrderField: true },
+      { id: "v4", preOrderField: true },
     ])
     expect(flagged()).toEqual([])
     const at = NOW.toISOString()
-    expect(scan()).toEqual({ after: "v5", scanned: 5, preOrderFields: 5, markers: 0, startedAt: at, updatedAt: at, completedAt: at })
+    expect(scan()).toEqual({
+      version: 2,
+      after: "v5",
+      scanned: 5,
+      preOrderFields: 5,
+      markers: 0,
+      checks: 0,
+      startedAt: at,
+      updatedAt: at,
+      completedAt: at,
+    })
   })
 
   it("stops at the page limit, and the next full run continues from the cursor", async () => {
@@ -1183,9 +1240,9 @@ describe("the variant metadata scan", () => {
   it("a failed write keeps the page's cursor, and the next full run reads it again", async () => {
     // Page 1 has nothing to delete; page 2's write fails.
     for (const v of catalogue.outside.slice(0, 2)) v.preOrderField = undefined
-    catalogue.failNext("setPreOrderFields")
+    catalogue.failNext("deleteLegacyKeys")
     await scanPluginMetadata(ctx, run(), limits())
-    expect(warnings).toContainEqual(expect.stringContaining("couldn't check variant metadata for stale keys: setPreOrderFields broke"))
+    expect(warnings).toContainEqual(expect.stringContaining("couldn't check variant metadata for stale keys: deleteLegacyKeys broke"))
     expect(scan()).toMatchObject({ after: "v2", scanned: 2, preOrderFields: 0, completedAt: null })
     expect(flagged()).toEqual(["v3", "v4", "v5"])
 
@@ -1211,21 +1268,142 @@ describe("the variant metadata scan", () => {
     expect(scan()).toMatchObject({ after: "v5", scanned: 5, completedAt: NOW.toISOString() })
   })
 
-  it("acts on the scope and tracking it is given", async () => {
-    // v1 is in this run's scope; v2's marker is the plugin's own (tracked).
-    catalogue.outside[1].backorderMarker = "print-on-demand"
-    catalogue.outside[2].backorderMarker = "pre-order"
-    await scanPluginMetadata(ctx, run({ inScope: new Set(["v1"]), tracked: new Set(["v2"]) }), limits())
+  it("acts on the scope it is given", async () => {
+    // v1 is in this run's scope: the run itself keeps its flag right.
+    await scanPluginMetadata(ctx, run({ inScope: new Set(["v1"]) }), limits())
     expect(flagged()).toEqual(["v1"])
-    expect(catalogue.outside.map((v) => v.backorderMarker)).toEqual([null, "print-on-demand", null, null, null])
-    expect(scan()).toMatchObject({ preOrderFields: 4, markers: 1 })
+    expect(scan()).toMatchObject({ preOrderFields: 4 })
   })
 
   it("scans again after a record from the first 0.2.0 build, which has no cursor", async () => {
     await state.setState(STATE_KEYS.metadataScan, { at: NOW.toISOString(), preOrderFields: 0, markers: 0 })
     await scanPluginMetadata(ctx, run(), limits())
     expect(catalogue.scanPages()[0]).toEqual([null, 2])
-    expect(scan()).toMatchObject({ after: "v5", scanned: 5, completedAt: NOW.toISOString() })
+    expect(scan()).toMatchObject({ version: 2, after: "v5", scanned: 5, completedAt: NOW.toISOString() })
+  })
+
+  it("a completed 0.2.0 scan record restarts as version 2", async () => {
+    const at = "2026-10-01T00:00:00.000Z"
+    await state.setState(STATE_KEYS.metadataScan, {
+      after: "v5",
+      scanned: 5,
+      preOrderFields: 3,
+      markers: 1,
+      startedAt: at,
+      updatedAt: at,
+      completedAt: at,
+    })
+    await scanPluginMetadata(ctx, run(), limits())
+    expect(catalogue.scanPages()[0]).toEqual([null, 2])
+    // Counted afresh.
+    expect(scan()).toEqual({
+      version: 2,
+      after: "v5",
+      scanned: 5,
+      preOrderFields: 5,
+      markers: 0,
+      checks: 0,
+      startedAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+      completedAt: NOW.toISOString(),
+    })
+    // A completed version 2 record is done.
+    catalogue.calls = []
+    await scanPluginMetadata(ctx, run(), limits())
+    expect(catalogue.scanPages()).toEqual([])
+  })
+
+  describe("the keys 0.2.0 kept in variant metadata", () => {
+    const legacy = (sku: string, status = "not-found") => ({ sku, status, checked_at: "2026-10-01T00:00:00.000Z" })
+    const variantOf = (id: string) => catalogue.outside.find((v) => v.id === id)!
+
+    beforeEach(() => {
+      for (const v of catalogue.outside) delete v.preOrderField
+    })
+
+    it("a legacy check is adopted, then deleted; an existing row wins", async () => {
+      variantOf("v1").skuCheck = legacy("OWN-v1")
+      variantOf("v2").skuCheck = { ...legacy("OWN-v2", "matched"), matched_sku: "own-v2-canon" }
+      // The SKU check wrote v3's row after 0.2.0 wrote its metadata.
+      variantOf("v3").skuCheck = legacy("OWN-v3")
+      variantRows.add("v3", "prod_v3", { sku: "OWN-v3", status: "matched", checked_at: NOW.toISOString() })
+      await scanPluginMetadata(ctx, run(), limits())
+      expect(variantRows.get("v1")).toMatchObject({ check_sku: "OWN-v1", check_status: "not-found", check_source: "metadata", product_id: "prod_v1" })
+      expect(variantRows.get("v2")).toMatchObject({ check_status: "matched", check_matched_sku: "own-v2-canon", check_source: "metadata" })
+      expect(variantRows.get("v3")).toMatchObject({ check_status: "matched", check_source: "sku-check" })
+      expect(catalogue.outside.map((v) => v.skuCheck)).toEqual([undefined, undefined, undefined, undefined, undefined])
+      expect(scan()).toMatchObject({ checks: 2, completedAt: NOW.toISOString() })
+    })
+
+    it("a failed adoption keeps the legacy check and the page's cursor", async () => {
+      variantOf("v1").skuCheck = legacy("OWN-v1")
+      variantRows.failNext("adopt")
+      await scanPluginMetadata(ctx, run(), limits())
+      expect(warnings).toContainEqual(expect.stringContaining("adopt broke"))
+      // Not deleted before it was adopted.
+      expect(variantOf("v1").skuCheck).toEqual(legacy("OWN-v1"))
+      expect(scan()).toBeUndefined()
+      await scanPluginMetadata(ctx, run(), limits())
+      expect(variantRows.get("v1")).toMatchObject({ check_status: "not-found", check_source: "metadata" })
+      expect(variantOf("v1").skuCheck).toBeUndefined()
+    })
+
+    it("a check outside Print Trail's profiles isn't adopted, but is deleted", async () => {
+      variantOf("v1").skuCheck = legacy("OWN-v1")
+      variantOf("v2").skuCheck = legacy("OWN-v2")
+      // A malformed value: nothing to adopt, still deleted.
+      variantOf("v4").skuCheck = "matched"
+      await scanPluginMetadata(ctx, run({ ptProducts: new Set(["prod_v1"]) }), limits())
+      expect(variantRows.rows.map((r) => r.variant_id)).toEqual(["v1"])
+      expect(variantOf("v2").skuCheck).toBeUndefined()
+      expect(variantOf("v4").skuCheck).toBeUndefined()
+      expect(scan()).toMatchObject({ checks: 1 })
+    })
+
+    it("a tracked variant's marker becomes its reason, then is deleted", async () => {
+      Object.assign(variantOf("v1"), { allowBackorder: true, backorderMarker: "pre-order" })
+      Object.assign(variantOf("v2"), { allowBackorder: true, backorderMarker: "pre-order" })
+      // v2's reason is already recorded: the record wins.
+      await state.setState(STATE_KEYS.backordered, { ids: ["v1", "v2"], reasons: { v2: "print-on-demand" } })
+      await scanPluginMetadata(ctx, run(), limits())
+      expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: ["v1", "v2"], reasons: { v1: "pre-order", v2: "print-on-demand" } })
+      expect(catalogue.outside.map((v) => v.backorderMarker)).toEqual([null, null, null, null, null])
+      // allow_backorder isn't written.
+      expect(catalogue.calls.filter((c) => c.method === "setBackorder")).toEqual([])
+      expect(scan()).toMatchObject({ markers: 2 })
+    })
+
+    it("an untracked variant's marker is deleted and its backorder left alone", async () => {
+      Object.assign(variantOf("v3"), { allowBackorder: true, backorderMarker: "print-on-demand" })
+      await state.setState(STATE_KEYS.backordered, { ids: [], reasons: {} })
+      await scanPluginMetadata(ctx, run(), limits())
+      expect(variantOf("v3")).toMatchObject({ allowBackorder: true, backorderMarker: null })
+      expect(state.values.get(STATE_KEYS.backordered)).toEqual({ ids: [], reasons: {} })
+      expect(catalogue.calls.filter((c) => c.method === "setBackorder")).toEqual([])
+    })
+
+    it("with an unknown scope, print_trail_pre_order is left", async () => {
+      variantOf("v1").preOrderField = "2026-12-01"
+      variantOf("v2").preOrderField = true
+      variantOf("v2").backorderMarker = "pre-order"
+      variantOf("v2").skuCheck = legacy("OWN-v2", "pre-order")
+      await scanPluginMetadata(ctx, run({ inScope: null }), limits())
+      expect(variantOf("v1").preOrderField).toBe("2026-12-01")
+      expect(variantOf("v2")).toMatchObject({ preOrderField: true, backorderMarker: null, skuCheck: undefined })
+      // v1 has nothing else to delete: not written.
+      expect(catalogue.legacyDeletes()).toEqual([[{ id: "v2", preOrderField: false }]])
+      expect(scan()).toMatchObject({ preOrderFields: 0, completedAt: NOW.toISOString() })
+    })
+
+    it("completion deletes sku_check_unmatched", async () => {
+      await state.setState(STATE_KEYS.skuCheckUnmatched, { skus: ["OWN-v1"] })
+      await scanPluginMetadata(ctx, run(), limits({ maxPages: 1 }))
+      // Not until every variant has been read.
+      expect(state.values.get(STATE_KEYS.skuCheckUnmatched)).toEqual({ skus: ["OWN-v1"] })
+      await scanPluginMetadata(ctx, run(), limits())
+      expect(scan()?.completedAt).toBe(NOW.toISOString())
+      expect(state.values.get(STATE_KEYS.skuCheckUnmatched)).toBeNull()
+    })
   })
 })
 
