@@ -9,6 +9,15 @@ export type CreateDecision = "skip-confirmed" | "adopt-confirmed" | "remote-canc
 const legacyConfirmed = (remote: PtOrder) =>
   remote.status === "queued" || remote.status === "scheduled" || remote.status === "processing" || !!remote.fulfillableFrom
 
+// Whether Print Trail has the order as confirmed: its confirmedAt (API
+// 1.1.0), else its legacy signals. Print Trail sets confirmedAt however the
+// order was confirmed, in its app too. Never the create step's status
+// heuristic: a holding order may never have been confirmed (its address was
+// rejected).
+export function confirmedAtPrintTrail(remote: PtOrder): boolean {
+  return typeof remote.confirmedAt === "string" || legacyConfirmed(remote)
+}
+
 // What the create step does, given the local row and the order as Print
 // Trail has it now (fetched by the row's pt_uuid, from a create 409's data,
 // or found by number after one). Never re-posts a confirmed order: a re-post
@@ -42,7 +51,7 @@ export function decideCreate(
   // One never confirmed is a real conflict (the row records the order). Under
   // 1.1.0 a once-confirmed order was "already confirmed" whatever its status.
   if (opts.problemType === PROBLEM_TYPES.notUpdatable) {
-    return typeof remote.confirmedAt === "string" || legacyConfirmed(remote) ? "adopt-confirmed" : "conflict"
+    return confirmedAtPrintTrail(remote) ? "adopt-confirmed" : "conflict"
   }
   if (typeof remote.confirmedAt === "string") {
     return "adopt-confirmed"

@@ -11,7 +11,7 @@ import {
 } from "../lines"
 import { clearRetry, RETRY_CAPS, RETRY_DELAY_MS, scheduleRetry } from "../retry"
 import { PROBLEM_TYPES } from "../../modules/printTrail/client/errors"
-import { confirmedAtOf, decideCreate, interpretConfirmError } from "../send-decisions"
+import { confirmedAtOf, confirmedAtPrintTrail, decideCreate, interpretConfirmError } from "../send-decisions"
 import { PT_CALL_SECONDS, remoteSubmittedLines, rowsPerRun, SEND_LOCK_TTL_SECONDS } from "../send-flow"
 
 const ptOption = (profile: string, method?: string) => ({
@@ -370,6 +370,33 @@ describe("decideCreate", () => {
     expect(decideCreate({ pt_uuid: "pt-1", confirmed_at: null }, ptOrder({ status: "cancelled" }))).toBe(
       "remote-cancelled"
     )
+  })
+})
+
+describe("confirmedAtPrintTrail", () => {
+  const AT = "2026-10-19T10:00:00+00:00"
+  it("is confirmedAt when Print Trail sends it, else its legacy signals", () => {
+    expect(confirmedAtPrintTrail(ptOrder({ status: "holding", confirmedAt: AT, fulfillableFrom: null }))).toBe(true)
+    // An order confirmed before confirmedAt existed reads null.
+    expect(confirmedAtPrintTrail(ptOrder({ status: "queued", confirmedAt: null, fulfillableFrom: null }))).toBe(true)
+    // Held with its address rejected, never confirmed.
+    expect(confirmedAtPrintTrail(ptOrder({ status: "holding", confirmedAt: null, fulfillableFrom: null }))).toBe(false)
+    expect(confirmedAtPrintTrail(ptOrder({ status: "draft", confirmedAt: null, fulfillableFrom: null }))).toBe(false)
+  })
+
+  it.each([
+    ["queued", {}, true],
+    ["scheduled", {}, true],
+    ["processing", {}, true],
+    ["holding", { fulfillableFrom: AT }, true],
+    ["draft", {}, false],
+    ["holding", {}, false],
+    // Not the create step's heuristic: nothing says a finished order was confirmed.
+    ["complete", {}, false],
+  ] as [string, Partial<PtOrder>, boolean][])("an older Print Trail API (no confirmedAt key): %s %o is %s", (status, over, expected) => {
+    const remote = ptOrder({ status, fulfillableFrom: null, ...over })
+    delete remote.confirmedAt
+    expect(confirmedAtPrintTrail(remote)).toBe(expected)
   })
 })
 

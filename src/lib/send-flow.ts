@@ -516,6 +516,16 @@ export function remoteSubmittedLines(remote: PtOrder): PtOrderLineInput[] {
   return [...byNumber.values()]
 }
 
+// The lines an adopted row records as sent. A lost row (adopted from a 409,
+// found by number, or whose create response was lost) never stored what it
+// sent: record the lines Print Trail has, so completion's coverage check and
+// the remainder target count them as sent. A row with lines keeps them.
+export function adoptedLines(row: PrintTrailOrderRow, remote: PtOrder): Record<string, unknown> {
+  const hasSent = Array.isArray(row.submitted_lines) && row.submitted_lines.length > 0
+  const remoteLines = hasSent ? [] : remoteSubmittedLines(remote)
+  return remoteLines.length ? { submitted_lines: remoteLines as unknown as Record<string, unknown> } : {}
+}
+
 // Attention the send path set: its block (block() records the reason as the
 // attention too), a stock shortfall, a capped send or confirm.
 const SEND_ATTENTION = new Set(["stock-shortfall", "retry-cap:send", "retry-cap:confirm"])
@@ -560,6 +570,51 @@ export function adoptionClears(
   }
 }
 
+// The timeline entry for an order found confirmed at Print Trail and
+// recorded here (the send path's adoption and the sync's).
+export const ADOPTED_MESSAGE = "Already confirmed at Print Trail; recorded it here"
+
+type Entry = { kind: string; message: string; data?: Record<string, unknown> }
+
+// What recording a confirmation made at Print Trail changes on the row (the
+// send path finding the order confirmed, or the sync seeing it): when it was
+// confirmed, and what adoptionClears clears, read against the row as stored
+// now. The refund entry is returned for the caller to write after its update,
+// `raised` names the attention it set (its event is the caller's), and
+// `pendingAction` is the row's as stored now.
+export async function adoptConfirmation(
+  store: Pick<SendStore, "listPrintTrailOrders" | "listPrintTrailOrderEvents">,
+  row: PrintTrailOrderRow,
+  remote: PtOrder,
+  now: Date,
+  opts: { orderCanceled: boolean }
+): Promise<{ columns: Record<string, unknown>; entries: Entry[]; raised: string | null; pendingAction: string | null }> {
+  const [fresh] = await store.listPrintTrailOrders({ id: row.id })
+  // The refund flow's marker: a refund it already flagged isn't again.
+  const noted =
+    fresh?.block_reason === "fully-refunded" &&
+    (await store.listPrintTrailOrderEvents({ print_trail_order_id: row.id, kind: REFUNDED })).length > 0
+  const clears = adoptionClears(fresh, remote, { orderCanceled: opts.orderCanceled, noted })
+  return {
+    // As a successful confirm does: a send block (a conflict an older
+    // plugin recorded, say) and its error no longer apply. Attention
+    // another flow set is kept.
+    columns: { confirmed_at: confirmedAtOf(remote, now), ...clears.columns },
+    // As the refund flow words it; data.kind marks it noted for that flow.
+    entries: clears.refund
+      ? [
+          {
+            kind: REFUNDED,
+            message: `The order was refunded in full in Medusa, but Print Trail may still ship ${row.pt_order_number}. Cancel the order to stop it.`,
+            data: { kind: REFUNDED, pt_uuid: remote.uuid },
+          },
+        ]
+      : [],
+    raised: clears.refund === "raise" ? REFUNDED : null,
+    pendingAction: fresh?.pending_action ?? null,
+  }
+}
+
 async function adopt(
   ctx: SendContext,
   row: PrintTrailOrderRow,
@@ -577,27 +632,16 @@ async function adopt(
     return null
   }
   if (decision === "adopt-confirmed") {
-    const confirmedAt = confirmedAtOf(remote, now)
-    // A lost row (adopted from a 409, or found by number) never stored what
-    // it sent: record the lines Print Trail has, so completion's coverage
-    // check and the remainder target count them as sent.
-    const hasSent = Array.isArray(row.submitted_lines) && row.submitted_lines.length > 0
-    const remoteLines = hasSent ? [] : remoteSubmittedLines(remote)
+    const adoption = await adoptConfirmation(ctx.store, row, remote, now, { orderCanceled: !!opts.orderCanceled })
+    const confirmedAt = adoption.columns.confirmed_at as Date
+    // The row as stored now, for the snapshot and the lease below (a cancel
+    // or amend intent is written outside the lock).
     const [fresh] = await ctx.store.listPrintTrailOrders({ id: row.id })
-    // The refund flow's marker: a refund it already flagged isn't again.
-    const noted =
-      fresh?.block_reason === "fully-refunded" &&
-      (await ctx.store.listPrintTrailOrderEvents({ print_trail_order_id: row.id, kind: REFUNDED })).length > 0
-    const clears = adoptionClears(fresh, remote, { orderCanceled: !!opts.orderCanceled, noted })
     await ctx.store.updatePrintTrailOrders({
       id: row.id,
       ...snapshotFields(remote, now, fresh ?? row),
-      ...(remoteLines.length ? { submitted_lines: remoteLines as unknown as Record<string, unknown> } : {}),
-      confirmed_at: confirmedAt,
-      // As a successful confirm does: a send block (a conflict an older
-      // plugin recorded, say) and its error no longer apply. Attention
-      // another flow set is kept.
-      ...clears.columns,
+      ...adoptedLines(row, remote),
+      ...adoption.columns,
       // In the same write: the send or confirm lease becomes a sync due now
       // (uncounted, run by the sweep), so a run that dies before recording
       // still ends synced. An adopted order may have moved on unseen (a lost
@@ -610,20 +654,13 @@ async function adopt(
         ? { pending_action: "refetch", next_attempt_at: now, attempts: zeroAttempts({ ...(fresh?.attempts ?? {}) }, ["refetch"]) }
         : {}),
     })
-    if (clears.refund) {
+    if (adoption.entries.length) {
       // Written here, next to the write that cleared the block, rather than
       // by the outcome step: the refund's trace survives a run that dies
-      // before recording. As the refund flow words it; data.kind marks it
-      // noted for that flow.
-      await ctx.store.createPrintTrailOrderEvents([
-        {
-          order_id: row.order_id,
-          print_trail_order_id: row.id,
-          kind: REFUNDED,
-          message: `The order was refunded in full in Medusa, but Print Trail may still ship ${row.pt_order_number}. Cancel the order to stop it.`,
-          data: { kind: REFUNDED, pt_uuid: remote.uuid },
-        },
-      ])
+      // before recording.
+      await ctx.store.createPrintTrailOrderEvents(
+        adoption.entries.map((e) => ({ order_id: row.order_id, print_trail_order_id: row.id, ...e }))
+      )
     }
     return {
       rowId: row.id,
@@ -631,7 +668,7 @@ async function adopt(
       pt: remote,
       blockReason: null,
       confirmedAt: confirmedAt.toISOString(),
-      ...(clears.refund === "raise" ? { raised: REFUNDED } : {}),
+      ...(adoption.raised ? { raised: adoption.raised } : {}),
     }
   }
   // Cancelled at Print Trail: record it and never re-confirm.
@@ -898,7 +935,7 @@ export async function recordOutcome(
     events.push({ name: "print_trail.order.attention", data: { ...eventData, attention } })
   } else if (create.outcome === "adopted-confirmed") {
     // adopt() replaced the lease with a due sync: kept (ownsPending below).
-    timeline.push({ kind: "adopted", message: "Already confirmed at Print Trail; recorded it here" })
+    timeline.push({ kind: "adopted", message: ADOPTED_MESSAGE })
     if (create.raised === REFUNDED) {
       // adopt() wrote its timeline entry.
       events.push({ name: "print_trail.order.attention", data: { ...eventData, attention: REFUNDED } })

@@ -15,6 +15,8 @@ name: Release
 # hand) with this workflow as its trusted publisher, so until then a tag only
 # makes the GitHub Release. CONTRIBUTING.md has the steps. The GitHub Release
 # comes first, so it lands even if npm refuses.
+# Both jobs run only in consilience/medusa-plugin-print-trail (each job's
+# `if`), so a v* tag pushed to a fork or a copy of it runs neither.
 on:
   push:
     tags: ["v*"]
@@ -23,6 +25,7 @@ permissions: {}
 
 jobs:
   release:
+    if: github.repository == 'consilience/medusa-plugin-print-trail'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -102,7 +105,7 @@ jobs:
     needs: release
     # A repository variable: a job-level `if` is evaluated before the job
     # starts, and an environment's variables exist only on the runner after.
-    if: vars.NPM_PUBLISH == 'true'
+    if: github.repository == 'consilience/medusa-plugin-print-trail' && vars.NPM_PUBLISH == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # npm's trusted publisher names this environment, whose deployment rule

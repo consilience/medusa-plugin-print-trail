@@ -8,6 +8,7 @@ import { runLegacyMetadataScan } from "../lib/stock-flow"
 import { describeStockResult, requestStockSync } from "../lib/stock-request"
 import { dueCancels, dueRows, findOrdersMissingRows, ordersMissingCancel, sweepWindow } from "../lib/sweep"
 import { runSweepSteps } from "../lib/sweep-steps"
+import { scheduleConfirmationRefetches } from "../lib/sync-flow"
 import { PRINT_TRAIL_MODULE } from "../modules/printTrail"
 import type PrintTrailModuleService from "../modules/printTrail/service"
 import { amendPrintTrailOrderWorkflow } from "../workflows/amend-print-trail-order"
@@ -16,12 +17,14 @@ import { runPrintTrailFollowUps } from "../workflows/run-follow-ups"
 import { sendOrderToPrintTrailWorkflow } from "../workflows/send-order-to-print-trail"
 import { buildSkuCheckQueueContext } from "../workflows/steps/sku-check-context"
 import { buildStockContext } from "../workflows/steps/stock-context"
+import { buildSyncStore } from "../workflows/steps/sync-context"
 import { refreshPrintTrailWebhookSecretWorkflow } from "../workflows/refresh-print-trail-webhook-secret"
 import { syncPrintTrailOrderWorkflow } from "../workflows/sync-print-trail-order"
 import { scheduleFor } from "../lib/schedules"
 
 // Runs due retries (stored on print_trail_order rows) and sends orders whose
-// order.placed never reached the plugin.
+// order.placed never reached the plugin. First it schedules a refetch of
+// blocked rows Print Trail has confirmed, which the due retries then run.
 export default async function printTrailSweepJob(container: MedusaContainer) {
   const logger = container.resolve(ContainerRegistrationKeys.LOGGER)
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
@@ -88,6 +91,7 @@ export default async function printTrailSweepJob(container: MedusaContainer) {
 
   await runSweepSteps(
     {
+      confirmedElsewhere: unlessStopped(scheduleConfirmedElsewhere),
       dueRetries: unlessStopped(runDueRetries),
       missedOrders: unlessStopped(sendMissedOrders),
       pendingStock: unlessStopped(runPendingStockSync),
@@ -97,6 +101,20 @@ export default async function printTrailSweepJob(container: MedusaContainer) {
     },
     logger,
   )
+
+  // 0. Blocked rows whose stored status says Print Trail confirmed them (in
+  // its app, while a version before 1.0.2 didn't record that): a refetch due
+  // now, which step 1 runs in this sweep.
+  async function scheduleConfirmedElsewhere() {
+    try {
+      const scheduled = await scheduleConfirmationRefetches(buildSyncStore(service), now)
+      if (scheduled.length) {
+        logger.info(`Print Trail sweep: re-reading ${scheduled.length} blocked order(s) Print Trail has confirmed`)
+      }
+    } catch (e) {
+      logger.error(`Print Trail sweep: scheduling refetches of confirmed orders failed: ${(e as Error)?.message ?? e}`)
+    }
+  }
 
   // 1. Due retries.
   async function runDueRetries() {

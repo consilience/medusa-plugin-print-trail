@@ -10,8 +10,16 @@ import { printTrailAppUrl } from "./app-url"
 import { settleCancel, type AdminNotifier, type CancelContext } from "./cancel-flow"
 import { clearReconcileFailure } from "./reconcile"
 import type { StateStore } from "./team-code"
-import { ACCESS_ATTENTION, clearRetry, deferralFor, RETRY_CAPS, scheduleRetry } from "./retry"
-import { snapshotFields, type PrintTrailEvent, type PrintTrailOrderRow } from "./send-flow"
+import { ACCESS_ATTENTION, clearRetry, deferralFor, RETRY_CAPS, scheduleRetry, zeroAttempts } from "./retry"
+import {
+  adoptConfirmation,
+  ADOPTED_MESSAGE,
+  adoptedLines,
+  snapshotFields,
+  type PrintTrailEvent,
+  type PrintTrailOrderRow,
+} from "./send-flow"
+import { confirmedAtPrintTrail } from "./send-decisions"
 import {
   completionDecision,
   diffRemote,
@@ -250,27 +258,36 @@ export const isLockTimeout = (e: unknown) => /failed to acquire lock/i.test((e a
 const refetchCapped = (row: PrintTrailOrderRow) => (row.attempts?.refetch ?? 0) > RETRY_CAPS.refetch
 
 // Schedules a refetch retry (60/300/900 s, then stop). Never replaces a
-// pending send, confirm, cancel or amend, and does nothing once capped:
-// returns false then.
+// pending send, confirm, cancel or amend, and does nothing once capped
+// (unless `reset`): returns false then.
 // `counted: false` is for a lock timeout: another run is syncing the order
 // right now, so a burst of webhooks mustn't use up a healthy order's retries.
+// `mark` sets that key in attempts in the same write (a marker that a caller
+// scheduled this row; every attempts write keeps the other keys).
+// `reset` (with `counted: false` only; ignored otherwise) schedules a capped
+// row too, its refetch count reset to 0 in the same write: a new sync cycle,
+// as the send path's adoption starts one. A retry-cap:refetch attention is
+// left to the refetch, whose sync replaces it.
 export async function scheduleRefetch(
   store: SyncStore,
   rowId: string,
   now: Date,
   lastError?: string | null,
-  opts: { counted?: boolean; dueAt?: Date } = {}
+  opts: { counted?: boolean; dueAt?: Date; mark?: string; reset?: boolean } = {}
 ): Promise<boolean> {
+  const reset = !!opts.reset && opts.counted === false
   const row = await getRow(store, rowId)
-  if (!row || (row.pending_action && row.pending_action !== "refetch") || refetchCapped(row)) {
+  if (!row || (row.pending_action && row.pending_action !== "refetch") || (refetchCapped(row) && !reset)) {
     return false
   }
+  const marked = (attempts: Record<string, number>) => (opts.mark ? { ...attempts, [opts.mark]: 1 } : attempts)
   if (opts.counted === false) {
+    const attempts = marked(requested(row))
     await store.updatePrintTrailOrders({
       id: row.id,
       pending_action: "refetch",
       next_attempt_at: opts.dueAt ?? new Date(now.getTime() + REFETCH_RETRY_DELAY_MS),
-      attempts: requested(row),
+      attempts: reset ? zeroAttempts(attempts, ["refetch"]) : attempts,
       last_error: lastError ?? row.last_error ?? null,
     })
     return true
@@ -279,7 +296,7 @@ export async function scheduleRefetch(
   const update: Record<string, unknown> = {
     id: row.id,
     pending_action: next.pending_action,
-    attempts: { ...next.attempts, [REQUESTS]: requested(row)[REQUESTS] },
+    attempts: marked({ ...next.attempts, [REQUESTS]: requested(row)[REQUESTS] }),
     next_attempt_at: next.next_attempt_at,
     last_error: lastError ?? row.last_error ?? null,
   }
@@ -347,6 +364,44 @@ export async function scheduleWaitingRefetches(store: SyncStore, targets: Waitin
     if (!row.confirmed_at || row.pending_action) continue
     const fulfilments = Array.isArray(row.fulfilments) ? (row.fulfilments as PtFulfilment[]) : []
     if (fulfilments.some(stale) && (await scheduleRefetch(store, row.id, now, null, { counted: false, dueAt: now }))) {
+      scheduled.push(row.id)
+    }
+  }
+  return scheduled
+}
+
+// Statuses only a confirmed order reaches, after the waiting ones.
+const FINISHED_STATUSES = ["complete", "partial", "returned", "failed"]
+// Set in attempts on a row scheduleConfirmationRefetches has scheduled.
+export const CONFIRM_REFETCH = "confirm_refetch"
+
+// Before 1.0.2 the sync stored Print Trail's status for an order confirmed in
+// the Print Trail app after the send blocked it, but not the confirmation, so
+// the block stayed. Such an order may not change again (and send a webhook)
+// for weeks. Schedules a refetch, run by the sweep, of each unconfirmed row
+// with a block whose stored status says Print Trail confirmed it. The
+// refetch records the confirmation (clearing the send block), after which
+// the row isn't picked again. A stored draft or holding order may never have
+// been confirmed (holding can come first); its next status change brings a
+// webhook. A row with a pending action is left to it: a send or confirm
+// retry adopts the confirmation itself. Not counted against the refetch cap
+// (nothing failed), and a count capped earlier (webhooks that came while
+// Print Trail couldn't be reached, say) is reset, as the send path's
+// adoption resets it. Due at once. Returns the scheduled row ids.
+//
+// Once per row (CONFIRM_REFETCH, written with the schedule): a refetch that
+// records no confirmation would otherwise leave the row to be scheduled on
+// every sweep. That happens when Print Trail no longer has the order (404),
+// or when it reads unconfirmed (an order confirmed before Print Trail
+// recorded confirmedAt, with a back-order or finished status, reads null).
+// A refetch that fails is retried as any refetch is (the row keeps
+// pending_action refetch: 60/300/900 s, then capped with attention).
+export async function scheduleConfirmationRefetches(store: SyncStore, now: Date): Promise<string[]> {
+  const rows = await store.listPrintTrailOrders({ status: [...WAITING_STATUSES, ...FINISHED_STATUSES], confirmed_at: null })
+  const scheduled: string[] = []
+  for (const row of rows) {
+    if (row.confirmed_at || !row.block_reason || !row.pt_uuid || row.pending_action || row.attempts?.[CONFIRM_REFETCH]) continue
+    if (await scheduleRefetch(store, row.id, now, null, { counted: false, dueAt: now, mark: CONFIRM_REFETCH, reset: true })) {
       scheduled.push(row.id)
     }
   }
@@ -441,18 +496,45 @@ export async function refetch(
     },
     pt
   )
+  // Confirmed at Print Trail but not here (confirmed in the Print Trail app
+  // after the send was blocked, say): recorded as the send path records an
+  // order it finds confirmed, clearing the send block it outdates. The
+  // remote attention below is then read as for a confirmed order.
+  const adoption =
+    !row.confirmed_at && confirmedAtPrintTrail(pt)
+      ? await adoptConfirmation(store, row, pt, now, { orderCanceled: !!(await medusaOrderCanceled(ctx, row.order_id)) })
+      : null
+  const basis = adoption ? ({ ...row, ...adoption.columns } as PrintTrailOrderRow) : row
   // Print Trail answered, so a refusal recorded on the row (a send, cancel
   // or edit waiting on access) is over, whatever settles the row next.
-  const current = row.attention && ACCESS_ATTENTION.has(row.attention) ? null : (row.attention ?? null)
-  const attention = nextAttention(current, await remoteAttentionFor(store, row, pt))
-  const update: Record<string, unknown> = { id: row.id, ...snapshotFields(pt, now, row), attention }
-  const dismissed = writeDismissed(pt.uuid, keepDismissed(readDismissed(row), remoteAttentionKeys(row, pt)))
+  const current = basis.attention && ACCESS_ATTENTION.has(basis.attention) ? null : (basis.attention ?? null)
+  const attention = nextAttention(current, await remoteAttentionFor(store, basis, pt))
+  // An adopted row records the lines Print Trail has when it stored none (its
+  // create response was lost), as the send path's adoption does.
+  const update: Record<string, unknown> = {
+    id: row.id,
+    ...snapshotFields(pt, now, row),
+    ...(adoption ? { ...adoptedLines(row, pt), ...adoption.columns } : {}),
+    attention,
+  }
+  const dismissed = writeDismissed(pt.uuid, keepDismissed(readDismissed(row), remoteAttentionKeys(basis, pt)))
   if (dismissed !== (row.dismissed_attention ?? null)) {
     update.dismissed_attention = dismissed
   }
   // The attempt count stays until the whole sync has finished cleanly
   // (complete() resets it), so a refusal further on still reaches the cap.
-  if (row.pending_action === "refetch") {
+  // A send or confirm retry ends with the adoption: this sync records the
+  // order (the send path, adopting, turns its lease into a sync). Left, the
+  // sweep would run it on every pass, and a refetch couldn't be scheduled.
+  // The adoption decides from the row as stored now, not as read before the
+  // GET: a cancel is written outside the lock, and one that landed meanwhile
+  // is kept. A refetch is ended, as without an adoption, only when this run
+  // was one.
+  const stored = adoption?.pendingAction
+  const ends = adoption
+    ? stored === "send" || stored === "confirm" || (stored === "refetch" && row.pending_action === "refetch")
+    : row.pending_action === "refetch"
+  if (ends) {
     Object.assign(update, { pending_action: null, next_attempt_at: null })
   }
   await store.updatePrintTrailOrders(update)
@@ -465,6 +547,9 @@ export async function refetch(
   const ptUrl = printTrailAppUrl(ctx.options, ctx.teamCode, pt.uuid)
   const stamp = (e: Entry): Entry => ({ ...e, data: { pt_url: ptUrl, pt_uuid: pt!.uuid, ...e.data } })
   const entries = changes.map(describe)
+  if (adoption) {
+    entries.push({ kind: "adopted", message: ADOPTED_MESSAGE }, ...adoption.entries)
+  }
   const attentionChanged = attention !== (row.attention ?? null)
   if (attentionChanged && attention?.startsWith("pt-")) {
     entries.push({ kind: attention, message: attentionMessage(attention) })
@@ -487,7 +572,20 @@ export async function refetch(
   if (attentionChanged && attention && isSyncAttention(attention)) {
     events.push({ name: "print_trail.order.attention", data: { ...eventData(synced), attention } })
   }
+  // A full refund's block the adoption turned into attention, as the send
+  // path announces it.
+  if (adoption?.raised && attention === adoption.raised) {
+    events.push({ name: "print_trail.order.attention", data: { ...eventData(synced), attention } })
+  }
   return { ...base, outcome: "synced", pt, changes, events }
+}
+
+// Whether the Medusa order is cancelled; undefined when it can't be read.
+function medusaOrderCanceled(ctx: SyncContext, orderId: string): Promise<boolean | undefined> {
+  return ctx.medusa
+    .loadDispatchOrder(orderId)
+    .then((o) => (o ? !!o.canceled_at || o.status === "canceled" : undefined))
+    .catch(() => undefined)
 }
 
 async function cancelContext(ctx: SyncContext, row: PrintTrailOrderRow): Promise<CancelContext> {
@@ -504,10 +602,7 @@ async function cancelContext(ctx: SyncContext, row: PrintTrailOrderRow): Promise
     },
     logger: { warn, info: () => {} } as unknown as CancelContext["logger"],
     order: { id: row.order_id, display_id: ctx.orderDisplayId ? await ctx.orderDisplayId(row.order_id) : null },
-    orderCanceled: await ctx.medusa
-      .loadDispatchOrder(row.order_id)
-      .then((o) => (o ? !!o.canceled_at || o.status === "canceled" : undefined))
-      .catch(() => undefined),
+    orderCanceled: await medusaOrderCanceled(ctx, row.order_id),
     now: ctx.now,
   }
 }

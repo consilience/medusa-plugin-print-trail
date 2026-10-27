@@ -488,6 +488,38 @@ describe("mock Print Trail-side helpers", () => {
     expect(o.fulfilments![0].requestedShippingMethod).toBe("express")
   })
 
+  it("confirmInApp confirms a draft as the app does", async () => {
+    mock.state.skuStatus["9780000000019"] = "pre-order"
+    const created = await client.createOrder(
+      draft("ORD-1002", [{ sku: "9780000000002", quantity: 1 }, { sku: "9780000000019", quantity: 1 }])
+    )
+    mock.setUpdatedAt(created.uuid, "2000-01-01T00:00:00Z")
+    const before = mock.state.requests.length
+    mock.confirmInApp(created.uuid)
+    const o = await client.getOrder(created.uuid)
+    expect(o).toMatchObject({ status: "queued", fulfillableFrom: expect.any(String), confirmedAt: expect.any(String) })
+    expect(o.updatedAt).not.toBe("2000-01-01T00:00:00Z")
+    // The pre-order line stays held, as the API's confirm leaves it.
+    expect(o.fulfilments!.map((f) => f.status)).toEqual(["back-order", "processing"])
+    // Made in the app: the only request is the read.
+    expect(mock.state.requests.slice(before)).toEqual([
+      expect.objectContaining({ method: "GET", path: `/v1/channels/acme-medusa1/orders/${created.uuid}` }),
+    ])
+  })
+
+  it("confirmInApp refuses an order that isn't a draft", async () => {
+    const uuid = await confirmed()
+    expect(() => mock.confirmInApp(uuid)).toThrow(/not a draft/)
+    expect(() => mock.confirmInApp("no-such-order")).toThrow(/no order/)
+  })
+
+  it("confirmInApp refuses a draft Print Trail can't confirm, and leaves it a draft", async () => {
+    mock.state.createFulfillableStatus = "not-fulfillable"
+    const created = await client.createOrder(draft("ORD-1003"))
+    expect(() => mock.confirmInApp(created.uuid)).toThrow(/refused \(428\).*that can be confirmed/)
+    expect(await client.getOrder(created.uuid)).toMatchObject({ status: "draft", confirmedAt: null })
+  })
+
   it("full-edits an order back to draft", async () => {
     const uuid = await confirmed()
     mock.fullEdit(uuid)

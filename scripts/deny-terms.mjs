@@ -1,5 +1,5 @@
 // The terms that must not appear in the package (check:package) or in any
-// tracked file (check:repo), and the scan both checks share.
+// exported file (check:repo), and the scan both checks share.
 //
 // Two lists. The generic patterns below are public. The identifying terms
 // (names, internal hosts, internal repositories and documents) are kept in the

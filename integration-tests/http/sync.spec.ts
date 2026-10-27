@@ -2,7 +2,9 @@ import { createHmac, randomUUID } from "node:crypto"
 import path from "node:path"
 import { medusaIntegrationTestRunner } from "@medusajs/test-utils"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
+import { snapshotFields } from "../../src/lib/send-flow"
 import { HARNESS, SKUS, useMock } from "./harness"
+import { adminHeaders, type Headers } from "./helpers/admin"
 import { runJob, stockJob, webhookStockRun } from "./helpers/jobs"
 import { CONFIRMS, eventsFor, printTrail, requests, rowFor, rowsFor, updateRow } from "./helpers/rows"
 import { seedStore, type Seed } from "./helpers/seed"
@@ -19,6 +21,7 @@ medusaIntegrationTestRunner({
   cwd: path.join(__dirname, "app"),
   testSuite: ({ api, getContainer, utils }) => {
     let seed: Seed
+    let admin: Headers
     const container = () => getContainer()
     const job = (name: "print-trail-sweep" | "print-trail-reconcile" | "print-trail-stock-sync") =>
       runJob(container(), name, utils.waitWorkflowExecutions)
@@ -64,6 +67,7 @@ medusaIntegrationTestRunner({
 
     beforeAll(async () => {
       seed = await seedStore(container())
+      admin = await adminHeaders(container())
     })
 
     beforeEach(() => {
@@ -226,6 +230,63 @@ medusaIntegrationTestRunner({
       await waitFor(async () => (await rowFor(container(), orderId))?.attention === "pt-draft-after-confirm", {
         what: "pt-draft-after-confirm",
       })
+    })
+
+    const attentionCount = async () => (await api.get("/admin/print-trail/attention", admin)).data.count as number
+
+    // Sent, but Print Trail couldn't confirm the draft (its address, say), so
+    // the send blocked it not-fulfillable, on Needs attention. Someone then
+    // fixes the order in the Print Trail app and confirms it there.
+    const confirmedInApp = async () => {
+      mock().state.createFulfillableStatus = "not-fulfillable"
+      const { orderId } = await placeOrder(api, seed, [{ variantId: seed.variants.pt, quantity: 1 }])
+      const row = await waitFor(async () => {
+        const r = await rowFor(container(), orderId)
+        return r?.block_reason === "not-fulfillable" ? r : undefined
+      }, { what: "not-fulfillable" })
+      mock().state.createFulfillableStatus = "fulfillable"
+      await utils.waitWorkflowExecutions()
+      expect(await attentionCount()).toBe(1)
+      mock().setStatus(row.pt_uuid, "draft", "fulfillable")
+      mock().confirmInApp(row.pt_uuid)
+      return { orderId, row }
+    }
+
+    it("an order confirmed in the Print Trail app leaves Needs attention", async () => {
+      const { orderId, row } = await confirmedInApp()
+      expect((await mock().sendWebhook("order-status-updated", row.pt_uuid)).status).toBe(202)
+      await waitFor(async () => (await rowFor(container(), orderId))?.confirmed_at, { what: "the confirmation recorded" })
+      await utils.waitWorkflowExecutions()
+      expect(await attentionCount()).toBe(0)
+      const { data } = await api.get(`/admin/print-trail/orders/${orderId}`, admin)
+      expect(data.rows).toHaveLength(1)
+      expect(data.rows[0]).toMatchObject({ confirmed_at: expect.any(String), block_reason: null, attention: null })
+      // The app confirmed it; the plugin never did.
+      expect(requests(mock(), "PUT", CONFIRMS)).toHaveLength(0)
+    })
+
+    it("the sweep clears a blocked row Print Trail has confirmed", async () => {
+      const { orderId, row } = await confirmedInApp()
+      // Waiting for a pre-order release at Print Trail, and stored as an
+      // earlier version's sync left it: Print Trail's order recorded, the
+      // confirmation not. No webhook comes until the order changes again.
+      Object.assign(mock().state.orders.get(row.pt_uuid).fulfilments[0], { status: "back-order", backOrderReason: "pre-order" })
+      mock().setStatus(row.pt_uuid, "back-order")
+      const pt = JSON.parse(JSON.stringify(mock().state.orders.get(row.pt_uuid)))
+      await updateRow(container(), { id: row.id, ...snapshotFields(pt, new Date(), row) })
+      expect(await rowFor(container(), orderId)).toMatchObject({ status: "back-order", confirmed_at: null, block_reason: "not-fulfillable" })
+      expect(await attentionCount()).toBe(1)
+      await job("print-trail-sweep")
+      expect(await attentionCount()).toBe(0)
+      expect(await rowFor(container(), orderId)).toMatchObject({
+        confirmed_at: expect.anything(),
+        block_reason: null,
+        attention: null,
+        pending_action: null,
+        // Scheduled once: the marker is stored with the row.
+        attempts: expect.objectContaining({ confirm_refetch: 1 }),
+      })
+      expect(requests(mock(), "PUT", CONFIRMS)).toHaveLength(0)
     })
 
     it("a -COPY order is noted, never adopted", async () => {

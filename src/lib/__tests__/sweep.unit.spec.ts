@@ -57,6 +57,10 @@ describe("runSweepSteps", () => {
     const errors: string[] = []
     await runSweepSteps(
       {
+        // First, so the refetches it schedules are due for dueRetries.
+        confirmedElsewhere: async () => {
+          ran.push("confirmed")
+        },
         dueRetries: async () => {
           ran.push("due")
           throw new Error("boom")
@@ -77,7 +81,7 @@ describe("runSweepSteps", () => {
       },
       { error: (m: string) => errors.push(m) }
     )
-    expect(ran).toEqual(["due", "missed", "stock", "sku", "legacy"])
+    expect(ran).toEqual(["confirmed", "due", "missed", "stock", "sku", "legacy"])
     expect(errors.join("\n")).toMatch(/boom/)
   })
 })

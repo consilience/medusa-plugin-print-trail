@@ -2,7 +2,7 @@
 
 Notes for working on `medusa-plugin-print-trail` in this repository. They cover files that are in the repository but not in the package, so this file isn't in the package either.
 
-External pull requests aren't accepted yet. Issues are welcome.
+This repository receives one commit per release, `Release <version>`, holding that version's tree, so its history is the release history. Issues are welcome, and so are pull requests. A pull request isn't merged here: its change is carried into the next release, and the pull request is closed when that release is out.
 
 ## Development
 
@@ -15,7 +15,7 @@ Use Node 22 (`.nvmrc`), 22.22.0 or later: the dev dependencies are Medusa 2.22.1
 | `npm run lint` | `medusa lint`. |
 | `npm run typecheck` | `tsc --noEmit` for the server, the admin and the staging checklist. |
 | `npm run check:package` | `scripts/check-package.mjs`, run after a build. It checks what `npm pack` would ship: every `exports` target present, the README, changelog and `LICENSE` included, no tests, mock, integration tests or `CONTRIBUTING.md`, no comments in the compiled server code or its declaration files (triple-slash directives included), no declaration file naming a package that isn't a peer dependency or a dependency (Node's own modules are allowed), or a path into `node_modules` or an absolute path, no binary file in the server code, and no internal reference in any packed file's name or text (text is decided by content, not extension). The terms are below. |
-| `npm run check:repo` | `scripts/check-repo.mjs`: the same terms over the name and text of every tracked file as the index holds it (`git ls-files --stage`, so staged changes are checked and unstaged ones aren't; binary files are listed, not scanned). |
+| `npm run check:repo` | `scripts/check-repo.mjs`: the same terms over the name and text of every file `git archive` would export from the index (the index is written as a tree and listed with `git archive`, so staged changes are checked and unstaged ones aren't, files marked `export-ignore` are skipped exactly as `git archive` skips them, and an index with unmerged entries fails; binary files are listed, not scanned). |
 | `npm run test:unit` | Jest unit tests (`src/**/__tests__/*.unit.spec.ts`). |
 | `npm run test:integration:modules` | Module integration tests against a local Postgres. |
 | `npm run test:integration:http` | Builds, then runs the HTTP harness. |
@@ -31,7 +31,7 @@ Use Node 22 (`.nvmrc`), 22.22.0 or later: the dev dependencies are Medusa 2.22.1
 2. `PT_DENY_TERMS_FILE`, the path of a file holding it;
 3. the file named by the git config key `printTrail.denyTermsFile`, a path relative to the repository root (`git config printTrail.denyTermsFile <path>` in a checkout that has the list).
 
-Without any of them, or with a list that has no terms, doesn't end with `# end of term list` or has an expression that doesn't compile, both checks fail with the reason (exit code 2) rather than run on the generic patterns alone. A term from the list is reported by its line number in the list (`private term 12`), never by its pattern, and an expression that doesn't compile by its line number only, since CI logs can be public. GitHub gives no secrets to workflows run from forks or by Dependabot, so both checks fail on those pull requests. That is accepted while external pull requests aren't.
+Without any of them, or with a list that has no terms, doesn't end with `# end of term list` or has an expression that doesn't compile, both checks fail with the reason (exit code 2) rather than run on the generic patterns alone. A term from the list is reported by its line number in the list (`private term 12`), never by its pattern, and an expression that doesn't compile by its line number only, since CI logs can be public. GitHub gives no secrets to workflows run from forks or by Dependabot, so both checks fail on those pull requests. That is accepted: such a pull request isn't merged, and both checks run on the release that carries its change.
 
 npm runs the `prepublishOnly` script (a build) before publishing the folder. Publishing a packed tarball, as the release does, runs no scripts. `npx medusa plugin:db:generate` generates the module's migrations. It takes no module name.
 
@@ -139,12 +139,12 @@ On staging (with `CHECKLIST_STAGING_DISPATCH`), `cancel-too-late` races the disp
 
 ## Releasing
 
-A pushed tag `v<version>` runs `.github/workflows/release.yml`, which has two jobs:
+A release arrives as one commit, `Release <version>`, which a maintainer pushes to `main`. Once CI passes on it, the maintainer tags it `v<version>` (an annotated tag: `git tag -a v<version> -m <version>`). A pushed tag `v<version>` runs `.github/workflows/release.yml`, which has two jobs:
 
 - **`release`** runs lint, typecheck, the repository check, the unit tests, the build and the package check; checks that the tag, `package.json`'s `version` and a `## [<version>]` section of `CHANGELOG.md` agree; runs `npm pack`; runs `scripts/install-test.sh` on the tarball with Medusa 2.17.2 and with 2.22.1; uploads the tarball as the run's `package` artifact; and creates a GitHub Release with the tarball attached and that changelog section as its notes, marked as a prerelease when the version has a `-`. It can write releases (`contents: write`) but can't request an OIDC token.
 - **`publish`** runs after `release` succeeds, only when the repository variable `NPM_PUBLISH` is `true`, in the `npm` environment. It downloads the `package` artifact and publishes that tarball to npm (below). Its only permission is `id-token: write`, no other job has it, and it doesn't check out the repository or run any project script, so none of the dependencies `npm ci` installs runs where the token can be requested. The split keeps the token away from dependency code. It doesn't check the tarball independently: `release` builds it with those dependencies installed.
 
-Until `NPM_PUBLISH` is set, `publish` is skipped and a tag only makes the GitHub Release.
+Until `NPM_PUBLISH` is set, `publish` is skipped and a tag only makes the GitHub Release. Both jobs run only in `consilience/medusa-plugin-print-trail` (`if: github.repository == ...`), so a tag pushed to a fork or a copy of the repository releases nothing.
 
 ### Releasing to npm
 

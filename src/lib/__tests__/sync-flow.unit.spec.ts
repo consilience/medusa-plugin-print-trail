@@ -7,6 +7,7 @@ import {
   confirm,
   createDraft,
   recordOutcome,
+  remoteSubmittedLines,
   type PrintTrailOrderRow,
   type SendContext,
   type SendStore,
@@ -18,13 +19,16 @@ import {
   flagReconcileFailure,
   isLockTimeout,
   recordCopySeen,
+  CONFIRM_REFETCH,
   refetch,
+  scheduleConfirmationRefetches,
   scheduleRefetch,
   scheduleWaitingRefetches,
   type MedusaOrderPort,
   type SyncContext,
   type SyncStore,
 } from "../sync-flow"
+import { requestCancel } from "../cancel-flow"
 import { memoryPreOrderSeen } from "../pre-order"
 import { dismissColumns } from "../admin/order-view"
 import { readDismissed, writeDismissed } from "../sync-decisions"
@@ -406,6 +410,390 @@ describe("refetch", () => {
     expect(r.outcome).toBe("channel-inactive")
     expect(rowOf()).toMatchObject({ pending_action: "refetch" })
     expect(rowOf().attempts?.refetch ?? 0).toBe(0)
+  })
+})
+
+describe("a confirmation made at Print Trail", () => {
+  const LINES = [line("978-A", 2, "item_a"), line("US-1", 1, "item_b")]
+  // Sent, but Print Trail couldn't confirm the draft (its address, say), so
+  // the send blocked it not-fulfillable, with no retry.
+  async function blocked(lines = LINES, sequence = 1) {
+    mock.state.createFulfillableStatus = "not-fulfillable"
+    const create = await createDraft(sendCtx, { order: graphOrder, lines, sequence })
+    const gate = await checkGate(sendCtx, graphOrder, create)
+    await recordOutcome(sendCtx, { orderId: "order_1", create, gate })
+    mock.state.createFulfillableStatus = "fulfillable"
+    store.events = []
+    const row = store.rows.find((r) => r.id === create.rowId)!
+    expect(row).toMatchObject({ block_reason: "not-fulfillable", attention: "not-fulfillable", confirmed_at: null, pending_action: null })
+    return { rowId: row.id, uuid: row.pt_uuid! }
+  }
+  // Someone fixes the order in the Print Trail app and confirms it there.
+  const confirmedInApp = (uuid: string) => {
+    mock.setStatus(uuid, "draft", "fulfillable")
+    mock.confirmInApp(uuid)
+  }
+  const rowById = (id: string) => store.rows.find((r) => r.id === id)!
+  const ptConfirmedAt = (uuid: string) => new Date(mock.state.orders.get(uuid).confirmedAt)
+  // The send flow's steps, as the sweep runs them for a due retry.
+  async function sendAgain(sequence = 1) {
+    const create = await createDraft(sendCtx, { order: graphOrder, lines: LINES, sequence })
+    const gate = await checkGate(sendCtx, graphOrder, create)
+    const confirmed = gate.ok
+      ? await confirm(sendCtx, { rowId: create.rowId!, pt: create.pt!, body: gate.body!, methodByLine: create.methodByLine })
+      : null
+    await recordOutcome(sendCtx, { orderId: "order_1", create, gate, confirm: confirmed })
+    return create
+  }
+
+  it("a confirmation made at Print Trail clears the send block", async () => {
+    const { rowId, uuid } = await blocked()
+    await store.updatePrintTrailOrders({ id: rowId, last_error: "Print Trail reports the order as not-fulfillable" })
+    confirmedInApp(uuid)
+    const r = await refetch(ctx, { rowId, source: "webhook" })
+    expect(r.outcome).toBe("synced")
+    expect(rowById(rowId)).toMatchObject({
+      status: "queued",
+      confirmed_at: ptConfirmedAt(uuid),
+      block_reason: null,
+      attention: null,
+      last_error: null,
+    })
+    // The send path's wording for an order it finds confirmed.
+    expect(store.events).toContainEqual(
+      expect.objectContaining({ kind: "adopted", message: "Already confirmed at Print Trail; recorded it here" })
+    )
+    // Recorded, not announced: no confirmed or attention event.
+    expect(r.events).toEqual([])
+  })
+
+  it("another flow's attention is kept when the confirmation is adopted", async () => {
+    const { rowId, uuid } = await blocked()
+    await store.updatePrintTrailOrders({ id: rowId, attention: "amend-refused", last_error: "edit refused" })
+    confirmedInApp(uuid)
+    await refetch(ctx, { rowId, source: "webhook" })
+    expect(rowById(rowId)).toMatchObject({
+      confirmed_at: ptConfirmedAt(uuid),
+      block_reason: null,
+      attention: "amend-refused",
+      last_error: "edit refused",
+    })
+  })
+
+  it("Print Trail's attention for a confirmed order applies once the confirmation is adopted", async () => {
+    const { rowId, uuid } = await blocked()
+    confirmedInApp(uuid)
+    // Confirmed, then no longer fulfillable at Print Trail.
+    mock.setStatus(uuid, "queued", "not-fulfillable")
+    const r = await refetch(ctx, { rowId, source: "webhook" })
+    expect(rowById(rowId)).toMatchObject({ confirmed_at: ptConfirmedAt(uuid), block_reason: null, attention: "pt-not-fulfillable" })
+    expect(store.kinds()).toContain("pt-not-fulfillable")
+    expect(r.events).toEqual([
+      { name: "print_trail.order.attention", data: expect.objectContaining({ attention: "pt-not-fulfillable" }) },
+    ])
+  })
+
+  it("a never-confirmed holding order isn't adopted", async () => {
+    const { rowId, uuid } = await blocked()
+    // Print Trail held the draft (its address rejected); it was never confirmed.
+    mock.setStatus(uuid, "holding")
+    expect(mock.state.orders.get(uuid).confirmedAt).toBeNull()
+    await refetch(ctx, { rowId, source: "webhook" })
+    expect(rowById(rowId)).toMatchObject({
+      status: "holding",
+      confirmed_at: null,
+      block_reason: "not-fulfillable",
+      attention: "not-fulfillable",
+    })
+    expect(store.kinds()).not.toContain("adopted")
+  })
+
+  it("an older Print Trail API's queued order is adopted, its draft isn't", async () => {
+    const queued = await blocked()
+    const draft = await blocked(LINES, 2)
+    mock.state.legacy = true
+    mock.setStatus(queued.uuid, "queued", "fulfillable")
+    mock.setStatus(draft.uuid, "draft", "fulfillable")
+    await refetch(ctx, { rowId: queued.rowId, source: "webhook" })
+    await refetch(ctx, { rowId: draft.rowId, source: "webhook" })
+    // No confirmedAt key and no countdown: confirmed as of the sync.
+    expect(rowById(queued.rowId)).toMatchObject({ confirmed_at: NOW, block_reason: null, attention: null })
+    expect(rowById(draft.rowId)).toMatchObject({ confirmed_at: null, block_reason: "not-fulfillable", attention: "not-fulfillable" })
+  })
+
+  it("a fully-refunded block becomes refunded-not-cancelled when the order is confirmed at Print Trail", async () => {
+    const { rowId, uuid } = await blocked()
+    await store.updatePrintTrailOrders({ id: rowId, block_reason: "fully-refunded", attention: null })
+    confirmedInApp(uuid)
+    const r = await refetch(ctx, { rowId, source: "webhook" })
+    const row = rowById(rowId)
+    expect(row).toMatchObject({ confirmed_at: ptConfirmedAt(uuid), block_reason: null, attention: "refunded-not-cancelled" })
+    const entry = store.events.find((e) => e.kind === "refunded-not-cancelled")
+    expect(entry).toMatchObject({ data: expect.objectContaining({ kind: "refunded-not-cancelled" }) })
+    expect(entry?.message).toContain(row.pt_order_number)
+    expect(r.events).toEqual([
+      { name: "print_trail.order.attention", data: expect.objectContaining({ attention: "refunded-not-cancelled" }) },
+    ])
+  })
+
+  it("a block the amend flow set is kept when the order is confirmed at Print Trail", async () => {
+    const lines = await blocked()
+    const method = await blocked(LINES, 2)
+    await store.updatePrintTrailOrders({ id: lines.rowId, block_reason: "no-pt-lines", attention: null })
+    await store.updatePrintTrailOrders({ id: method.rowId, block_reason: "no-pt-shipping-method", attention: "no-pt-shipping-method" })
+    confirmedInApp(lines.uuid)
+    confirmedInApp(method.uuid)
+    await refetch(ctx, { rowId: lines.rowId, source: "webhook" })
+    await refetch(ctx, { rowId: method.rowId, source: "webhook" })
+    expect(rowById(lines.rowId)).toMatchObject({ confirmed_at: ptConfirmedAt(lines.uuid), block_reason: "no-pt-lines", attention: null })
+    expect(rowById(method.rowId)).toMatchObject({
+      confirmed_at: ptConfirmedAt(method.uuid),
+      block_reason: "no-pt-shipping-method",
+      attention: "no-pt-shipping-method",
+    })
+  })
+
+  // A send or confirm retry waiting on Print Trail (it couldn't be reached),
+  // while someone confirmed the order in the app.
+  async function pendingRetry(action: "send" | "confirm") {
+    const { rowId, uuid } = await blocked()
+    await store.updatePrintTrailOrders({
+      id: rowId,
+      block_reason: null,
+      attention: null,
+      pending_action: action,
+      next_attempt_at: NOW,
+      attempts: { [action]: 1 },
+      last_error: "Print Trail could not be reached",
+    })
+    confirmedInApp(uuid)
+    await refetch(ctx, { rowId, source: "webhook" })
+    // The sync stands in for the retry: nothing is left for the sweep to run.
+    expect(rowById(rowId)).toMatchObject({ confirmed_at: ptConfirmedAt(uuid), pending_action: null, next_attempt_at: null })
+    const before = mock.state.requests.length
+    const create = await sendAgain()
+    expect(create.outcome).toBe("skip-confirmed")
+    const sent = mock.state.requests.slice(before)
+    expect(sent.filter((q) => q.method === "POST" && q.path.endsWith("/orders"))).toEqual([])
+    expect(sent.filter((q) => q.path.endsWith("/confirm"))).toEqual([])
+  }
+
+  it("a pending send retry on an order confirmed at Print Trail posts nothing", async () => {
+    await pendingRetry("send")
+  })
+
+  it("a pending confirm retry on an order confirmed at Print Trail posts nothing", async () => {
+    await pendingRetry("confirm")
+  })
+
+  it("a cancel requested while the sync reads the order is kept when the confirmation is adopted", async () => {
+    const { rowId, uuid } = await blocked()
+    await store.updatePrintTrailOrders({
+      id: rowId,
+      block_reason: null,
+      attention: null,
+      pending_action: "send",
+      next_attempt_at: new Date(NOW.getTime() + 300_000),
+      attempts: { send: 1 },
+      last_error: "Print Trail could not be reached",
+    })
+    confirmedInApp(uuid)
+    // The order is cancelled in Medusa during the GET: cancel intent is
+    // written outside the order lock.
+    const getOrder = ctx.client.getOrder.bind(ctx.client)
+    ctx.client.getOrder = async (id: string) => {
+      const pt = await getOrder(id)
+      await requestCancel(store, [rowById(rowId)], "order-canceled", NOW)
+      return pt
+    }
+    await refetch(ctx, { rowId, source: "webhook" })
+    expect(rowById(rowId)).toMatchObject({
+      confirmed_at: ptConfirmedAt(uuid),
+      cancel_status: "requested",
+      pending_action: "cancel",
+      next_attempt_at: NOW,
+    })
+  })
+
+  it("an adopted row that never stored its lines records Print Trail's, and completes once dispatched", async () => {
+    const { rowId, uuid } = await blocked()
+    // The create reached Print Trail but its response was lost: no uuid and
+    // no lines stored, a send retry pending. A webhook names the order.
+    await store.updatePrintTrailOrders({
+      id: rowId,
+      pt_uuid: null,
+      submitted_lines: null,
+      block_reason: null,
+      attention: null,
+      pending_action: "send",
+      next_attempt_at: NOW,
+    })
+    confirmedInApp(uuid)
+    await refetch(ctx, { rowId, source: "webhook", ptUuidHint: uuid })
+    expect(rowById(rowId)).toMatchObject({ pt_uuid: uuid, confirmed_at: ptConfirmedAt(uuid), pending_action: null })
+    expect(rowById(rowId).submitted_lines).toEqual(remoteSubmittedLines(mock.state.orders.get(uuid)))
+    expect(rowById(rowId).submitted_lines).toHaveLength(2)
+    mock.dispatch(uuid)
+    const { c } = await sync()
+    expect(c).toMatchObject({ action: "complete", completed: true })
+    expect(rowById(rowId).attention ?? null).toBeNull()
+  })
+
+  it("an adopted pre-order is refetched when its product is released", async () => {
+    mock.state.stock["PRE-1"] = 0
+    mock.state.skuStatus["PRE-1"] = "pre-order"
+    const { rowId, uuid } = await blocked([line("978-A", 2, "item_a"), line("PRE-1", 1, "item_b")])
+    confirmedInApp(uuid)
+    await refetch(ctx, { rowId, source: "webhook" })
+    expect(rowById(rowId)).toMatchObject({ confirmed_at: ptConfirmedAt(uuid), pending_action: null })
+    expect(await scheduleWaitingRefetches(store, { active: ["PRE-1"] }, NOW)).toEqual([rowId])
+    expect(rowById(rowId)).toMatchObject({ pending_action: "refetch", next_attempt_at: NOW })
+  })
+
+  // A row an earlier plugin version left: its sync stored Print Trail's
+  // status after the app confirm, but not the confirmation, so the send
+  // block stayed. No webhook comes until the order changes again.
+  async function storedUnconfirmed(status: string, lines = LINES, sequence = 1) {
+    const { rowId, uuid } = await blocked(lines, sequence)
+    confirmedInApp(uuid)
+    mock.setStatus(uuid, status)
+    await store.updatePrintTrailOrders({ id: rowId, status, fulfillable_status: "fulfillable" })
+    return { rowId, uuid }
+  }
+
+  it("scheduleConfirmationRefetches schedules a blocked row stored as back-order", async () => {
+    // Waiting for a pre-order release.
+    mock.state.stock["PRE-1"] = 0
+    mock.state.skuStatus["PRE-1"] = "pre-order"
+    const { rowId, uuid } = await storedUnconfirmed("back-order", [line("978-A", 2, "item_a"), line("PRE-1", 1, "item_b")])
+    expect((mock.state.orders.get(uuid).fulfilments as any[]).map((f) => f.backOrderReason)).toContain("pre-order")
+    // A finished order too.
+    const done = await storedUnconfirmed("complete", LINES, 2)
+    expect(await scheduleConfirmationRefetches(store, NOW)).toEqual([rowId, done.rowId])
+    // Due now, so the same sweep's retries run it, and not counted against
+    // the refetch cap.
+    expect(rowById(rowId)).toMatchObject({ pending_action: "refetch", next_attempt_at: NOW })
+    expect(rowById(rowId).attempts?.refetch ?? 0).toBe(0)
+    // The refetch records the confirmation; the row isn't scheduled again.
+    await refetch(ctx, { rowId, source: "retry" })
+    expect(rowById(rowId)).toMatchObject({
+      confirmed_at: ptConfirmedAt(uuid),
+      block_reason: null,
+      attention: null,
+      pending_action: null,
+      next_attempt_at: null,
+    })
+    expect(await scheduleConfirmationRefetches(store, NOW)).toEqual([])
+  })
+
+  it("scheduleConfirmationRefetches skips a blocked draft, a blocked holding row, a confirmed row and a row with a pending action", async () => {
+    // Blocked, and still a draft as far as the store knows.
+    const draft = await blocked(LINES, 1)
+    // Held before it was ever confirmed (its address rejected): its next
+    // status change brings a webhook.
+    const holding = await blocked(LINES, 2)
+    mock.setStatus(holding.uuid, "holding")
+    await store.updatePrintTrailOrders({ id: holding.rowId, status: "holding" })
+    // Confirmed, with a block the amend flow set, which adoption keeps.
+    const confirmed = await storedUnconfirmed("queued", LINES, 3)
+    await store.updatePrintTrailOrders({ id: confirmed.rowId, confirmed_at: NOW, block_reason: "no-pt-lines" })
+    // A send retry: the send path adopts the confirmation itself.
+    const pending = await storedUnconfirmed("queued", LINES, 4)
+    await store.updatePrintTrailOrders({ id: pending.rowId, pending_action: "send", next_attempt_at: new Date(NOW.getTime() + 900_000) })
+
+    expect(await scheduleConfirmationRefetches(store, NOW)).toEqual([])
+    for (const { rowId } of [draft, holding, confirmed]) {
+      expect(rowById(rowId)).toMatchObject({ pending_action: null })
+    }
+    expect(rowById(pending.rowId)).toMatchObject({ pending_action: "send", next_attempt_at: new Date(NOW.getTime() + 900_000) })
+  })
+
+  // The sweep's run of a scheduled refetch: the sync workflow's three steps.
+  async function syncRow(rowId: string) {
+    const r = await refetch(ctx, { rowId, source: "retry" })
+    const d = await dispatch(ctx, r)
+    const c = await complete(ctx, r, d)
+    return { r, d, c }
+  }
+
+  it("scheduleConfirmationRefetches schedules a row once, though its refetch records no confirmation", async () => {
+    // Confirmed before Print Trail recorded confirmedAt: it reads null, with
+    // no countdown, in a status the legacy signals don't cover.
+    const legacy = await storedUnconfirmed("back-order")
+    Object.assign(mock.state.orders.get(legacy.uuid), { confirmedAt: null, fulfillableFrom: null })
+    // Print Trail no longer has the order.
+    const missing = await storedUnconfirmed("complete", LINES, 2)
+    mock.state.orders.delete(missing.uuid)
+
+    expect(await scheduleConfirmationRefetches(store, NOW)).toEqual([legacy.rowId, missing.rowId])
+    expect((await syncRow(legacy.rowId)).r.outcome).toBe("synced")
+    expect((await syncRow(missing.rowId)).r.outcome).toBe("not-found")
+    expect(rowById(legacy.rowId)).toMatchObject({ confirmed_at: null, block_reason: "not-fulfillable", pending_action: null })
+    // The send block's attention stays; the missing order is on the timeline.
+    expect(rowById(missing.rowId)).toMatchObject({ confirmed_at: null, attention: "not-fulfillable", pending_action: null })
+    expect(store.kinds()).toContain("pt-order-missing")
+    // Still blocked and unconfirmed, but not scheduled again.
+    expect(await scheduleConfirmationRefetches(store, NOW)).toEqual([])
+  })
+
+  it("scheduleConfirmationRefetches schedules a row whose refetch count was capped, resetting it", async () => {
+    const { rowId, uuid } = await storedUnconfirmed("queued")
+    // Webhooks that came while Print Trail couldn't be reached used up the
+    // refetch retries.
+    await store.updatePrintTrailOrders({
+      id: rowId,
+      attempts: { ...rowById(rowId).attempts, refetch: 4 },
+      pending_action: null,
+      attention: "retry-cap:refetch",
+    })
+    expect(await scheduleConfirmationRefetches(store, NOW)).toEqual([rowId])
+    expect(rowById(rowId)).toMatchObject({
+      pending_action: "refetch",
+      next_attempt_at: NOW,
+      attempts: expect.objectContaining({ refetch: 0, [CONFIRM_REFETCH]: 1 }),
+    })
+    // The sync records the confirmation and replaces the capped refetch's
+    // attention.
+    expect((await syncRow(rowId)).r.outcome).toBe("synced")
+    expect(rowById(rowId)).toMatchObject({
+      confirmed_at: ptConfirmedAt(uuid),
+      block_reason: null,
+      attention: null,
+      pending_action: null,
+    })
+    expect(await scheduleConfirmationRefetches(store, NOW)).toEqual([])
+  })
+
+  it("scheduleConfirmationRefetches skips a row it has scheduled before", async () => {
+    const { rowId } = await storedUnconfirmed("queued")
+    await store.updatePrintTrailOrders({ id: rowId, attempts: { ...rowById(rowId).attempts, [CONFIRM_REFETCH]: 1 } })
+    expect(await scheduleConfirmationRefetches(store, NOW)).toEqual([])
+    expect(rowById(rowId).pending_action).toBeNull()
+  })
+
+  it("a scheduled confirmation refetch that fails is retried as any refetch is", async () => {
+    const { rowId, uuid } = await storedUnconfirmed("queued")
+    expect(await scheduleConfirmationRefetches(store, NOW)).toEqual([rowId])
+    // Print Trail can't be reached for the whole first run (the client's own
+    // retry included).
+    mock.fail(new RegExp(`/orders/${uuid}$`), 503, undefined, 2)
+    expect((await syncRow(rowId)).r.outcome).toBe("transient")
+    expect(rowById(rowId)).toMatchObject({
+      confirmed_at: null,
+      pending_action: "refetch",
+      next_attempt_at: new Date(NOW.getTime() + 60_000),
+      attempts: expect.objectContaining({ refetch: 1, [CONFIRM_REFETCH]: 1 }),
+    })
+    // The retry runs it; the confirmation is recorded and the count cleared,
+    // the marker kept.
+    expect((await syncRow(rowId)).r.outcome).toBe("synced")
+    expect(rowById(rowId)).toMatchObject({
+      confirmed_at: ptConfirmedAt(uuid),
+      block_reason: null,
+      attention: null,
+      pending_action: null,
+      attempts: expect.objectContaining({ refetch: 0, [CONFIRM_REFETCH]: 1 }),
+    })
   })
 })
 

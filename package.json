@@ -1,6 +1,6 @@
 {
   "name": "medusa-plugin-print-trail",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Print Trail fulfilment for Medusa v2: orders sent automatically, stock levels synced and tracking sent back to Medusa.",
   "author": "Consilience Media Limited",
   "license": "SEE LICENSE IN LICENSE",

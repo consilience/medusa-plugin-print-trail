@@ -113,6 +113,11 @@ export type MockPrintTrail = {
   // What Print Trail's own app and production do to an order. Each one moves
   // updatedAt, as Print Trail does.
   setStatus(uuid: string, status: string, fulfillableStatus?: string): void
+  // Someone confirms a draft in the app: what PUT /orders/{uuid}/confirm does
+  // to it with no body (queued, confirmedAt set, held lines left back-order),
+  // with no request recorded. Throws unless the order is a draft, and with
+  // the refusal where the API would refuse (e.g. a draft not fulfillable).
+  confirmInApp(uuid: string): void
   cancelFulfilment(uuid: string, index: number): void
   setShippingMethod(uuid: string, index: number, code: string): void
   // The app's full edit: back to draft, fulfilments dropped, lines kept.
@@ -569,6 +574,12 @@ export function startMockPrintTrail(opts: MockOptions = {}): Promise<MockPrintTr
         ),
       }
     }
+    return confirmDraft(o, body)
+  }
+
+  // What confirming does to a draft, through the API or in Print Trail's app
+  // (confirmInApp, with no body): refused (428, 409) or queued.
+  const confirmDraft = (o: any, body: any) => {
     if (o.fulfillableStatus !== "fulfillable") {
       return {
         status: 428,
@@ -1036,6 +1047,17 @@ export function startMockPrintTrail(opts: MockOptions = {}): Promise<MockPrintTr
     o.updatedAt = now()
   }
 
+  const confirmInApp = (uuid: string) => {
+    const o = get(uuid)
+    // eslint-disable-next-line @medusajs/use-medusa-error-not-generic-error
+    if (o.status !== "draft") throw new Error(`mock: order ${uuid} is ${o.status}, not a draft`)
+    const { status, body } = confirmDraft(o, {}) as { status: number; body: any }
+    if (status !== 202) {
+      // eslint-disable-next-line @medusajs/use-medusa-error-not-generic-error
+      throw new Error(`mock: confirming order ${uuid} was refused (${status}): ${body.detail ?? body.message}`)
+    }
+  }
+
   const cancelFulfilment = (uuid: string, index: number) => {
     const o = get(uuid)
     o.fulfilments[index].status = "cancelled"
@@ -1284,6 +1306,7 @@ export function startMockPrintTrail(opts: MockOptions = {}): Promise<MockPrintTr
         fail: (path, status, body, times = 1, headers) => failures.push({ path, status, body, times, headers }),
         sendWebhook,
         setStatus,
+        confirmInApp,
         cancelFulfilment,
         setShippingMethod,
         fullEdit,

@@ -4,6 +4,14 @@ All notable changes to `medusa-plugin-print-trail` are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 package uses [semantic versioning](https://semver.org/).
 
+## [1.0.2] - 2026-10-27
+
+### Fixed
+
+- **An order confirmed in the Print Trail app after the plugin blocked it** (an address Print Trail rejected, say) is now recorded as confirmed: the block and its attention clear on the next sync. Before, such an order stayed on Needs attention.
+- Orders an earlier version left in that state clear without waiting for Print Trail: the sweep re-reads each one once, if the status it last stored is past confirmation (queued, back-order or complete, say). One last stored as draft or holding clears on its next change at Print Trail, or with **Refresh from Print Trail** on its order page.
+- A send or confirm retry waiting on such an order ends when the sync records the confirmation.
+
 ## [1.0.1] - 2026-10-27
 
 ### Changed
