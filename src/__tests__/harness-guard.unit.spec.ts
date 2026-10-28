@@ -25,4 +25,12 @@ describe("HTTP harness fixture", () => {
       expect(load).toThrow(/refusing Print Trail host/)
     }
   )
+
+  // Unset means the plugin's default, the production Print Trail API. The
+  // options are merged over the mock's, so only a null or blank value can
+  // unset it.
+  it.each([null, "", " "])("refuses to load with the base URL unset (%p)", (baseUrl) => {
+    process.env.PT_HARNESS_OPTIONS = JSON.stringify({ baseUrl })
+    expect(load).toThrow(/refusing Print Trail host/)
+  })
 })

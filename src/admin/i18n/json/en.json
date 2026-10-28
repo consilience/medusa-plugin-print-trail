@@ -158,10 +158,11 @@
     "token-invalid": "Print Trail refused the connection: the API token or channel ID is wrong. Check PRINT_TRAIL_API_TOKEN and PRINT_TRAIL_CHANNEL_ID.",
     "channel-inactive": "The Print Trail channel is inactive. Print Trail refuses every request from it and sends it no webhooks. Make it active in Print Trail (Settings → Channels), then press Test connection.",
     "channel-not-found": "Print Trail has no channel {{channelId}}. Check PRINT_TRAIL_CHANNEL_ID.",
-    "not-print-trail": "The endpoint answered, but it isn't the Print Trail API. Check PRINT_TRAIL_BASE_URL.",
+    "not-print-trail": "The endpoint answered, but it isn't the Print Trail API. Check PRINT_TRAIL_BASE_URL, or leave it unset for production.",
     "token-other-channel": "This token belongs to Print Trail channel {{tokenChannelId}}, but the store is configured for {{channelId}}.",
     "unreachable": "Couldn't reach the Print Trail API. It may be down; try again shortly.",
-    "error": "The Print Trail API returned an error: {{detail}}"
+    "error": "The Print Trail API returned an error: {{detail}}",
+    "stagingOnProduction": "If these are Print Trail staging credentials, set PRINT_TRAIL_BASE_URL to the staging host: unset, it means production."
   },
   "webhook": {
     "states": {

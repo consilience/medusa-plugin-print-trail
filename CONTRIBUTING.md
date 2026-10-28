@@ -23,6 +23,8 @@ Use Node 22 (`.nvmrc`), 22.22.0 or later: the dev dependencies are Medusa 2.22.1
 | `npm run checklist:staging` | The staging end-to-end checklist against a real store (below). |
 | `npm run mock` | The bundled mock Print Trail API on `127.0.0.1:$PORT` (default `4010`), token `$PT_TOKEN` (default `dev-token`), channel `$PT_CHANNEL_ID` (default `test-channel`), webhook secret `$PT_WEBHOOK_SECRET` (default `mock-secret`, returned by `POST /webhooks`). `PT_LEGACY=1` makes it behave like the Print Trail API before 2026-10-19: no secret from registering, no `confirmedAt`, no typed duplicate-create 409. |
 
+A store used for development must set `PRINT_TRAIL_BASE_URL`, to Print Trail staging or the mock (`http://127.0.0.1:4010` with `npm run mock`'s defaults): left unset, it means the production Print Trail API.
+
 ### Internal-reference checks
 
 `check:package` and `check:repo` share `scripts/deny-terms.mjs`. It holds the generic patterns (the section sign, numbered plans, home-directory paths, and any email address outside the domains reserved for examples and tests) and a short list of text that is allowed although a term matches it (this repository's slug and the package's former npm name, the licensor's name, Print Trail's staging API host, and a dependency's deprecation notice in the lockfile). The identifying terms are in the maintainers' term list, which isn't in this repository. Its format: one JavaScript regular expression per line, matched case-insensitively unless the line starts with `cs:`; blank lines and lines starting with `#` are skipped. Its last line that isn't blank is `# end of term list`, so a list cut short is noticed. The scripts read it from, in order:
@@ -48,7 +50,7 @@ DB_HOST=localhost DB_USERNAME=<pg user> DB_PASSWORD=<pg password> npm run test:i
 - **`REDIS_URL`** (for example `redis://localhost:6379`) switches the harness to Redis locking and turns on the concurrent-send test. Without it, that test is skipped. Each spec file's app takes its locks under its own Redis namespace, so a lock an app held when it shut down doesn't hold up the next file.
 - **`npm run test:staging`** runs a smoke test against Print Trail staging by hand. It needs `PT_STAGING_BASE_URL`, `PT_STAGING_CHANNEL_ID`, `PT_STAGING_API_TOKEN` and `PT_STAGING_SKUS` (comma-separated SKUs the staging channel can order), and refuses any host that isn't `https` under `consilstaging.com`, or is a `printtrail.com` host. With none of the variables set it is skipped. Its orders are numbered `CI-<run id>-<attempt>-<n>` (locally `CI-local<timestamp>-<n>`) and cancelled at the end.
 
-No test, script or CI job reaches Print Trail production.
+No test, script or CI job reaches Print Trail production. The plugin's default host is production, so each guard refuses an unset base URL too: the HTTP harness loads only with the mock's URL, the staging smoke and the checklist refuse anything but staging (or, with `--mock`, the mock), and Jest's setup file (`integration-tests/setup.js`, for every test type) refuses any `fetch` to `api.printtrail.com` before it leaves the machine. That keeps a test that leaves out its base URL from reaching production, but doesn't make it fail: the client treats the refusal as a network error and retries, and its caller may fall back or store a retry.
 
 ### The package's exports
 

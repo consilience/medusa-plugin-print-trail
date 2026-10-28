@@ -58,6 +58,19 @@ describe("staging checklist config", () => {
     expect(assertPrintTrailTarget("staging", "https://printtrail-core.consilstaging.com").hostname).toBe("printtrail-core.consilstaging.com")
   })
 
+  // Unset would leave the store's own URL unchecked, and the plugin's default
+  // host is production.
+  it("refuses an unset PT_STAGING_BASE_URL, against staging and with --mock", () => {
+    for (const args of [[], ["--mock"]]) {
+      const mode = args.length ? "mock" : "staging"
+      for (const unset of [undefined, ""]) {
+        expect(() => assertPrintTrailTarget(mode, unset)).toThrow(/PT_STAGING_BASE_URL is not set/)
+        expect(() => loadConfig(parseArgs(args), env({ PT_STAGING_BASE_URL: unset }))).toThrow(/PT_STAGING_BASE_URL is not set/)
+      }
+      expect(() => loadConfig(parseArgs(args), env({ PT_STAGING_BASE_URL: "  " }))).toThrow(/PT_STAGING_BASE_URL/)
+    }
+  })
+
   it("--mock allows only http://127.0.0.1:<port>", () => {
     expect(assertMockTarget("http://127.0.0.1:4011").port).toBe("4011")
     for (const url of ["http://localhost:4011", "https://127.0.0.1:4011", "http://127.0.0.1", "https://printtrail-core.consilstaging.com", "http://127.0.0.1:4011/v1"]) {

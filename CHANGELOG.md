@@ -4,6 +4,15 @@ All notable changes to `medusa-plugin-print-trail` are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 package uses [semantic versioning](https://semver.org/).
 
+## [1.1.0] - 2026-10-28
+
+**Upgrading.** A store that already sets `PRINT_TRAIL_BASE_URL` needs to do nothing. A store whose own startup check refuses a `PRINT_TRAIL_BASE_URL` that isn't staging, but lets an unset one through, should now treat an unset URL as production whenever `PRINT_TRAIL_CHANNEL_ID` or `PRINT_TRAIL_API_TOKEN` is set, since the plugin then connects to production.
+
+### Changed
+
+- **The base URL defaults to the Print Trail API, `https://api.printtrail.com`**, so a store sets only `PRINT_TRAIL_CHANNEL_ID` and `PRINT_TRAIL_API_TOKEN`. `PRINT_TRAIL_BASE_URL` (the `baseUrl` option) is now only an override, for Print Trail staging or a mock. A channel ID or token without a base URL no longer stops the plugin's module loading. The default is safe because credentials belong to one environment: a staging token, or since API 1.2.0 an unknown channel ID, is refused by production. With no credentials the plugin stays unconnected, as before.
+- The settings page's setup snippet no longer lists `PRINT_TRAIL_BASE_URL`, and the settings page shows the production endpoint when none is set.
+
 ## [1.0.2] - 2026-10-27
 
 ### Fixed

@@ -76,9 +76,9 @@ Setting `providers` replaces Medusa's default list, so keep the manual provider 
 
 ### 3. Set the environment variables
 
-- `PRINT_TRAIL_BASE_URL`: `https://api.printtrail.com`. It has no default, so set it with the other two: a channel ID or token without it stops the plugin's module loading.
 - `PRINT_TRAIL_CHANNEL_ID`: the store's Print Trail channel ID.
 - `PRINT_TRAIL_API_TOKEN`: the channel's API token.
+- `PRINT_TRAIL_BASE_URL` (optional): leave it unset for the Print Trail API, `https://api.printtrail.com`. Set it only to use Print Trail staging or a mock.
 - `MEDUSA_BACKEND_URL`: this backend's public `https://` URL. Print Trail sends its webhooks to `{MEDUSA_BACKEND_URL}/hooks/print-trail`, and only to an `https://` URL on a public host, so a local store needs an HTTPS tunnel.
 - `MEDUSA_ADMIN_URL`: the Medusa admin URL, for links from Print Trail back to the order.
 - `PRINT_TRAIL_ADMIN_EMAIL`: who is emailed when a Medusa cancel comes too late for Print Trail. A comma-separated list is accepted.

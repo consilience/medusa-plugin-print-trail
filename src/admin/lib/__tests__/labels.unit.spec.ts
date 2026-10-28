@@ -4,6 +4,7 @@ import {
   attentionKey,
   blockReasonKey,
   checkBadge,
+  diagnosisHintKey,
   diagnosisKey,
   dismissBodyKey,
   refusalKey,
@@ -80,6 +81,19 @@ describe("labels", () => {
     // Known codes never fall through to the unknown label.
     expect(ATTENTION.filter((c) => attentionKey(c).key === "attention.unknown")).toEqual([])
     expect(BLOCK.filter((c) => blockReasonKey(c).key === "block.unknown")).toEqual([])
+  })
+
+  it("suggests the staging host when production refuses the token or channel", () => {
+    expect(diagnosisHintKey("token-invalid", "production")).toBe("diagnosis.stagingOnProduction")
+    expect(diagnosisHintKey("channel-not-found", "production")).toBe("diagnosis.stagingOnProduction")
+    expect(has("diagnosis.stagingOnProduction")).toBe(true)
+    expect(en.diagnosis.stagingOnProduction).toContain("PRINT_TRAIL_BASE_URL")
+    for (const environment of ["staging", "other", null, undefined] as const) {
+      expect(diagnosisHintKey("token-invalid", environment)).toBeNull()
+    }
+    for (const code of DIAGNOSIS.filter((c) => c !== "token-invalid" && c !== "channel-not-found")) {
+      expect(diagnosisHintKey(code, "production")).toBeNull()
+    }
   })
 
   it("says a dismissed Print Trail code stays cleared until Print Trail's order changes", () => {

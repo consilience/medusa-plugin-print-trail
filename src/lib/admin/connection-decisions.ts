@@ -1,5 +1,5 @@
 import { isIP } from "node:net"
-import { isConnected, STAGING_HOST, type PrintTrailPluginOptions } from "../../config"
+import { isConnected, PRODUCTION_HOST, STAGING_HOST, type PrintTrailPluginOptions } from "../../config"
 import { PrintTrailApiError } from "../../modules/printTrail/client/errors"
 import type { PtChannel, PtToken } from "../../modules/printTrail/client/types"
 import type {
@@ -39,7 +39,7 @@ export function endpointInfo(baseUrl: string | undefined): EndpointView {
   const host = hostOf(baseUrl)
   let environment: EndpointView["environment"] = "other"
   if ((host && host === hostOf(STAGING_HOST)) || (host && /staging/i.test(host))) environment = "staging"
-  else if (host === "api.printtrail.com") environment = "production"
+  else if (host === hostOf(PRODUCTION_HOST)) environment = "production"
   return { url: baseUrl, environment }
 }
 

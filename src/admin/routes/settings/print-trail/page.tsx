@@ -22,6 +22,7 @@ import { CONFIG_SNIPPET, ENV_SNIPPET, formatDate } from "../../../lib/format"
 import { confirmationSteps } from "../../../lib/webhook-confirm"
 import {
   checkBadge,
+  diagnosisHintKey,
   diagnosisKey,
   type Label,
   secretSourceKey,
@@ -63,6 +64,7 @@ const Section = ({ title, id, actions, children }: { title: string; id?: string;
 const ConnectionSection = ({ view, onTest, testing }: { view: ConnectionView; onTest: () => void; testing: boolean }) => {
   const { t } = useTranslation("printTrail")
   const d = view.diagnosis
+  const hint = d.ok ? null : diagnosisHintKey(d.code, view.endpoint.environment)
   return (
     <Section
       title={t("settings.connection.heading")}
@@ -88,6 +90,7 @@ const ConnectionSection = ({ view, onTest, testing }: { view: ConnectionView; on
                 tokenChannelId: d.tokenChannelId ?? "",
                 channelId: view.credentials.channelId ?? "",
               })}
+              {hint && ` ${t(hint)}`}
             </Value>
           </>
         )}
@@ -608,12 +611,13 @@ const SettingsPage = () => {
     mutationFn: () => api.testConnection(),
     onSuccess: async (result) => {
       if (!result.diagnosis.ok) {
+        const hint = diagnosisHintKey(result.diagnosis.code, connection.data?.endpoint.environment)
         toast.error(
           t(diagnosisKey(result.diagnosis.code), {
             detail: result.diagnosis.detail ?? "",
             tokenChannelId: result.diagnosis.tokenChannelId ?? "",
             channelId: connection.data?.credentials.channelId ?? "",
-          })
+          }) + (hint ? ` ${t(hint)}` : "")
         )
         return
       }

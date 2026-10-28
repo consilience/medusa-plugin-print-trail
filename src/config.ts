@@ -1,5 +1,4 @@
-import { MedusaError } from "@medusajs/framework/utils"
-
+export const PRODUCTION_HOST = "https://api.printtrail.com"
 export const STAGING_HOST = "https://printtrail-core.consilstaging.com"
 
 export type PrintTrailCredentials = {
@@ -59,6 +58,16 @@ export function printTrailOptionsFromEnv(
   }
 }
 
+// Trimmed, empty as unset, with production as the default host: safe, as a
+// staging token (or, since API 1.2.0, an unknown channel ID) is a 401 there.
+export function resolveCredentials(o: PrintTrailCredentials | undefined): PrintTrailCredentials {
+  return {
+    baseUrl: stripSlash(clean(o?.baseUrl)) || PRODUCTION_HOST,
+    channelId: clean(o?.channelId),
+    apiToken: clean(o?.apiToken),
+  }
+}
+
 export function isConnected(o: PrintTrailCredentials): boolean {
   return !!(o.baseUrl && o.channelId && o.apiToken)
 }
@@ -87,24 +96,8 @@ export function resolvePluginOptions(
   raw: RawPrintTrailPluginOptions | Partial<PrintTrailPluginOptions> | undefined
 ): PrintTrailPluginOptions {
   const o = (raw ?? {}) as RawPrintTrailPluginOptions
-  const baseUrl = stripSlash(clean(o.baseUrl))
-  const channelId = clean(o.channelId)
-  const apiToken = clean(o.apiToken)
-
-  // No default host: a public plugin must never reach production (or staging)
-  // unless someone chose it.
-  if ((channelId || apiToken) && !baseUrl) {
-    throw new MedusaError(
-      MedusaError.Types.INVALID_DATA,
-      "Print Trail API: PRINT_TRAIL_BASE_URL is not set. Use https://api.printtrail.com, " +
-        `or ${STAGING_HOST} for staging.`
-    )
-  }
-
   return {
-    baseUrl,
-    channelId,
-    apiToken,
+    ...resolveCredentials(o),
     webhookSecret: clean(o.webhookSecret),
     backendUrl: stripSlash(clean(o.backendUrl)),
     adminUrl: stripSlash(clean(o.adminUrl)),

@@ -7,7 +7,7 @@ import type {
   Logger,
   ValidateFulfillmentDataContext,
 } from "@medusajs/framework/types"
-import { isConnected, type PrintTrailCredentials } from "../../config"
+import { isConnected, resolveCredentials, type PrintTrailCredentials } from "../../config"
 import { bandsFor, cartWeight, countryName, FALLBACK_METHODS, priceForWeight, rateCardSchema } from "../../lib/rate-card"
 import { PrintTrailClient } from "../../modules/printTrail/client/client"
 import { isCartOptionListing } from "./pricing-context"
@@ -26,7 +26,7 @@ export class PrintTrailFulfillmentService extends AbstractFulfillmentProviderSer
   constructor({ logger }: { logger: Logger }, options: PrintTrailCredentials) {
     super()
     this.logger_ = logger
-    this.options_ = options ?? {}
+    this.options_ = resolveCredentials(options)
   }
 
   // The provider lives in the Fulfillment Module's container and can't resolve

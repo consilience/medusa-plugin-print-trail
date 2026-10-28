@@ -1,8 +1,9 @@
 import {
   isConnected,
+  PRODUCTION_HOST,
   printTrailOptionsFromEnv,
+  resolveCredentials,
   resolvePluginOptions,
-  STAGING_HOST,
 } from "../config"
 
 describe("printTrailOptionsFromEnv", () => {
@@ -30,7 +31,7 @@ describe("printTrailOptionsFromEnv", () => {
 describe("resolvePluginOptions", () => {
   it("applies the documented defaults", () => {
     expect(resolvePluginOptions(undefined)).toEqual({
-      baseUrl: undefined,
+      baseUrl: PRODUCTION_HOST,
       channelId: undefined,
       apiToken: undefined,
       webhookSecret: undefined,
@@ -72,10 +73,24 @@ describe("resolvePluginOptions", () => {
     expect(resolvePluginOptions({ notifications: { shipment: "my-shipment" } }).notifications.shipment).toBe("my-shipment")
   })
 
-  it("fails loudly when credentials are set without a base URL", () => {
-    expect(() => resolvePluginOptions({ channelId: "acme-medusa1", apiToken: "tok" })).toThrow(
-      STAGING_HOST
-    )
+  it("defaults the base URL to the production Print Trail API", () => {
+    expect(PRODUCTION_HOST).toBe("https://api.printtrail.com")
+    const o = resolvePluginOptions({ channelId: "acme-medusa1", apiToken: "tok" })
+    expect(o.baseUrl).toBe(PRODUCTION_HOST)
+    expect(isConnected(o)).toBe(true)
+    expect(resolvePluginOptions({ baseUrl: "  " }).baseUrl).toBe(PRODUCTION_HOST)
+    expect(resolveCredentials(printTrailOptionsFromEnv({ PRINT_TRAIL_CHANNEL_ID: "acme-medusa1", PRINT_TRAIL_API_TOKEN: "tok" }))).toEqual({
+      baseUrl: PRODUCTION_HOST,
+      channelId: "acme-medusa1",
+      apiToken: "tok",
+    })
+    expect(resolveCredentials(undefined)).toEqual({ baseUrl: PRODUCTION_HOST, channelId: undefined, apiToken: undefined })
+  })
+
+  it("keeps a base URL override, trimmed and without trailing slashes", () => {
+    const o = resolvePluginOptions({ baseUrl: "  http://127.0.0.1:4010// ", channelId: " c ", apiToken: " t " })
+    expect(o).toMatchObject({ baseUrl: "http://127.0.0.1:4010", channelId: "c", apiToken: "t" })
+    expect(resolveCredentials({ baseUrl: " https://pt.example/ " }).baseUrl).toBe("https://pt.example")
   })
 
   it("is not connected, and does not throw, with no credentials", () => {

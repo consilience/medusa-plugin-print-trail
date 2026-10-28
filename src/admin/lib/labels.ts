@@ -1,5 +1,6 @@
 import type {
   DiagnosisCode,
+  EndpointView,
   SettingsWarning,
   StockSyncNowView,
   WebhookAction,
@@ -92,6 +93,10 @@ export function attentionKey(code: string): Label {
 }
 
 export const diagnosisKey = (code: DiagnosisCode) => `diagnosis.${code}`
+// Production, the default host, refuses staging credentials: the likeliest
+// cause when no PRINT_TRAIL_BASE_URL is set. Shown after the diagnosis.
+export const diagnosisHintKey = (code: DiagnosisCode, environment: EndpointView["environment"] | undefined) =>
+  environment === "production" && (code === "token-invalid" || code === "channel-not-found") ? "diagnosis.stagingOnProduction" : null
 export const webhookStateKey = (s: WebhookState) => `webhook.states.${s}`
 export const webhookActionKey = (a: WebhookAction) => `webhook.actions.${a}`
 export const secretSourceKey = (source: "print-trail" | "configured" | null) =>

@@ -42,6 +42,20 @@ describe("PrintTrailFulfillmentService", () => {
     ])
   })
 
+  it("uses the production Print Trail API when no base URL is set", async () => {
+    const guarded = globalThis.fetch
+    const stub = jest.fn(async () => new Response(JSON.stringify([{ code: "standard", name: "Standard" }]), { status: 200 }))
+    globalThis.fetch = stub as unknown as typeof fetch
+    try {
+      const p = provider({ channelId: "acme-medusa1", apiToken: "prov-token" })
+      expect(await p.getFulfillmentOptions()).toEqual([{ id: "standard", name: "Standard", method: "standard" }])
+      expect(stub).toHaveBeenCalledTimes(1)
+      expect((stub.mock.calls[0] as unknown[])[0]).toBe("https://api.printtrail.com/v1/channels/acme-medusa1/shipping-methods")
+    } finally {
+      globalThis.fetch = guarded
+    }
+  })
+
   it("falls back to the four codes without credentials or on failure", async () => {
     const fallback = ["standard", "express", "air", "tracked"]
     const p = provider({})
