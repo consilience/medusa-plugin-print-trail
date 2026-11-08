@@ -113,8 +113,8 @@
       }
     },
     "options": {
-      "heading": "Options in force",
-      "help": "Set in medusa-config.ts and read at startup.",
+      "heading": "Settings",
+      "help": "A value saved here overrides the plugin options in medusa-config.ts and applies within a few seconds, with no restart. Reset returns it to the plugin options.",
       "orderNumberPrefix": "Order number prefix",
       "defaultShippingMethod": "Default shipping method",
       "confirmOn": "Confirm on",
@@ -122,6 +122,7 @@
       "stockSync": "Stock sync",
       "reconcile": "Reconcile",
       "reconcileValue": "on, looking back {{days}} days",
+      "lookbackDays": "Reconcile look-back (days)",
       "autoComplete": "Complete orders when everything has shipped",
       "shipmentEmail": "Shipment email template",
       "cancelTooLateEmail": "Cancel-too-late email template",
@@ -139,6 +140,55 @@
       "job": "Job",
       "variable": "Variable",
       "schedule": "Schedule"
+    },
+    "deployment": {
+      "heading": "Deployment",
+      "help": "Set in medusa-config.ts and environment variables. Changing one needs a restart."
+    },
+    "edit": {
+      "title": "Edit: {{label}}",
+      "source": {
+        "config": "plugin options",
+        "admin": "set here",
+        "ignored": "saved value ignored"
+      },
+      "ignoredHelp": "The value saved here is no longer valid, so the plugin options' value applies. Edit or reset it.",
+      "changedBy": "Changed by {{who}}, {{at}}",
+      "resetBy": "Reset by {{who}}, {{at}}",
+      "someone": "an admin",
+      "configValue": "Plugin options: {{value}}",
+      "reset": "Reset",
+      "resetTitle": "Reset {{label}}?",
+      "resetBody": "It goes back to the plugin options' value: {{value}}.",
+      "resetYes": "Reset",
+      "saved": "Saved {{label}}",
+      "resetDone": "{{label}} is back to the plugin options",
+      "prefixHelp": "Letters, digits and - _ . / # only. Orders already sent keep their numbers.",
+      "prefixExample": "Order 1001 would be sent as {{example}}",
+      "confirmPrefixTitle": "Order numbers could repeat",
+      "confirmPrefixBody": "With this prefix, new orders could be given numbers already sent to Print Trail, such as {{numbers}}. Print Trail would then replace or refuse those orders. Save it anyway?",
+      "confirmPrefixYes": "Save anyway",
+      "confirmPrefixPartial": "There are too many orders already sent to Print Trail to check them all, so new orders could be given numbers already sent. Print Trail would then replace or refuse those orders. Save it anyway?",
+      "confirmPlacedTitle": "Confirm orders waiting for payment?",
+      "confirmPlacedBody_one": "{{count}} order waiting for payment, placed within the reconcile look-back, will be confirmed with Print Trail by the next sweep, paid or not.",
+      "confirmPlacedBody_other": "{{count}} orders waiting for payment, placed within the reconcile look-back, will be confirmed with Print Trail by the next sweep, paid or not.",
+      "confirmPlacedYes": "Confirm them",
+      "confirmOnHelp": "Orders already confirmed stay confirmed. Orders not yet confirmed follow the new setting at their next step; with order.placed, orders waiting for payment are confirmed by the next sweep.",
+      "lookbackHelp": "From {{min}} to {{max}} days. It also bounds the search for orders that were never sent.",
+      "emailsHelp": "Separate addresses with commas or new lines. At most {{max}}.",
+      "locationsHelp": "None ticked: every location stocking the SKU.",
+      "noLocations": "No stock locations",
+      "templateOn": "Send this email",
+      "templateId": "Template id",
+      "errors": {
+        "template": "Enter a template id, or turn the email off.",
+        "email": "One of these isn't an email address.",
+        "emailCount": "Too many addresses.",
+        "lookbackDays": "Enter a whole number of days in range.",
+        "prefixCharacters": "Use letters, digits and - _ . / # only, with no spaces.",
+        "prefixLength": "The prefix is too long.",
+        "required": "Choose a value."
+      }
     },
     "empty": {
       "heading": "Connect Print Trail",
@@ -247,6 +297,11 @@
     "countriesCount_other": "{{count}} countries have their own bands",
     "countriesHint": "A destination listed here is priced from its own bands; any other destination from the weight bands above. Saving keeps them as they are. You can remove a country here, which also clears one the card can't accept. To change a country's bands, or the currency of a card with countries, send the whole card through the Admin API (see Prices by country in the plugin's reference at docs.printtrail.com/integrations/medusa-reference).",
     "removeCountry": "Remove",
+    "freeOver": "Free delivery over",
+    "freeOverHint": "The option is free when the cart's items reach this amount: their total after discounts, including tax, across the whole cart. The weight bands still limit it. Leave empty for no free delivery in that currency.",
+    "freeOverIn": "Free delivery over, in {{currency}}",
+    "freeOverNone": "No free delivery",
+    "freeOverSummary": "free over {{amount}}",
     "noCard": "No rate card",
     "invalidCard": "Invalid rate card",
     "methodsFallback": "Print Trail couldn't be reached, so its four standard methods are offered.",
@@ -261,6 +316,7 @@
       "ascending": "Each limit must be above the one before",
       "price": "Use a price of 0 or more",
       "ambiguousComma": "Write this without a thousands separator: 1250 or 1.25",
+      "freeOver": "Use an amount of 0 or more, or leave it empty",
       "countriesCurrency": "Some countries' bands have no price in this currency. Change the currency through the Admin API with every country priced in it, or remove those countries."
     }
   },

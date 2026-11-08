@@ -1,7 +1,7 @@
 import type { SubscriberArgs, SubscriberConfig } from "@medusajs/framework"
 import { ContainerRegistrationKeys } from "@medusajs/framework/utils"
 import { orderIdForPayment } from "../lib/payment-order"
-import { withinLookback } from "../lib/sweep"
+import { AWAITING_PAYMENT, withinLookback } from "../lib/sweep"
 import type { PrintTrailOrderRow } from "../lib/send-flow"
 import { PRINT_TRAIL_MODULE } from "../modules/printTrail"
 import type PrintTrailModuleService from "../modules/printTrail/service"
@@ -9,9 +9,20 @@ import { recordPrintTrailOrderChangeWorkflow } from "../workflows/record-print-t
 import { runPrintTrailFollowUps } from "../workflows/run-follow-ups"
 import { sendOrderToPrintTrailWorkflow } from "../workflows/send-order-to-print-trail"
 
+async function confirmsWhenPlaced(service: PrintTrailModuleService): Promise<boolean> {
+  try {
+    return (await service.getFreshOptions()).confirmOn === "order.placed"
+  } catch {
+    return false
+  }
+}
+
 // payment.captured and payment.refunded carry the payment id, not the order.
-// A capture confirms orders held for it (confirmOn: "payment.captured"); a
-// refund is recorded on the timeline.
+// A capture re-runs the send of the orders not yet confirmed, deciding by
+// confirmOn as saved now (never this process's cached copy): the confirm
+// gate refuses an unpaid order and leaves a confirmed one alone, so a
+// capture just after a switch to confirming on payment isn't lost. A refund
+// is recorded on the timeline.
 export default async function printTrailPaymentHandler({
   event: { data, name },
   container,
@@ -20,7 +31,6 @@ export default async function printTrailPaymentHandler({
   const service = container.resolve<PrintTrailModuleService>(PRINT_TRAIL_MODULE)
   if (!(await service.isConnected())) return
   const options = await service.getOptions()
-  if (name === "payment.captured" && options.confirmOn !== "payment.captured") return
   try {
     const orderId = await orderIdForPayment(container.resolve(ContainerRegistrationKeys.QUERY), data.id)
     if (!orderId) return
@@ -30,6 +40,20 @@ export default async function printTrailPaymentHandler({
       await recordPrintTrailOrderChangeWorkflow(container).run({
         input: { order_id: orderId, change: { kind: "refund", payment_id: data.id } },
       })
+      return
+    }
+    // Under confirming when placed (read now, past the cache) a capture
+    // changes nothing the gate decides, but for a row the gate held for
+    // payment before a switch: only those are sent again. A row confirmed,
+    // or with a send in flight (its lease), or none yet, is the order.placed
+    // send's and the sweep's, so a capture at checkout doesn't wait for the
+    // order's lock behind that send. If the settings can't be read, the
+    // capture takes the path below, which the gate decides.
+    if (await confirmsWhenPlaced(service)) {
+      const held = rows.filter(
+        (r) => r.block_reason === AWAITING_PAYMENT && !r.confirmed_at && !r.pending_action && !r.cancel_status && r.status !== "cancelled"
+      )
+      if (held.length) await runPrintTrailFollowUps(container, orderId, held.map((r) => r.sequence))
       return
     }
     // Capture: re-run the send for every row still waiting to confirm. No

@@ -5,7 +5,9 @@ import type PrintTrailModuleService from "../../modules/printTrail/service"
 import { GATE_ORDER_FIELDS } from "../../lib/lines"
 import type { GateState, SendContext, SendStore } from "../../lib/send-flow"
 
-export async function buildSendContext(container: MedusaContainer): Promise<SendContext> {
+// freshOptions: the options read past the settings cache, for the confirm
+// gate, so a confirmOn changed in the admin moments ago decides it.
+export async function buildSendContext(container: MedusaContainer, { freshOptions = false } = {}): Promise<SendContext> {
   const service = container.resolve<PrintTrailModuleService>(PRINT_TRAIL_MODULE)
   const link = container.resolve(ContainerRegistrationKeys.LINK)
   const query = container.resolve(ContainerRegistrationKeys.QUERY)
@@ -38,7 +40,7 @@ export async function buildSendContext(container: MedusaContainer): Promise<Send
   return {
     store,
     client: await service.getClient(),
-    options: await service.getOptions(),
+    options: freshOptions ? await service.getFreshOptions() : await service.getOptions(),
     async reloadGateState(orderId) {
       const { data } = await query.graph({ entity: "order", fields: GATE_ORDER_FIELDS, filters: { id: orderId } })
       return (data[0] as unknown as GateState | undefined) ?? null

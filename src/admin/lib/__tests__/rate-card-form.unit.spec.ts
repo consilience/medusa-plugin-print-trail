@@ -1,5 +1,17 @@
 import type { ShippingOptionView } from "../../../lib/admin-types"
-import { countryLabel, describeBands, describeCountries, emptyForm, formToRateCard, rateCardToForm, removeCountry, type RateCardForm } from "../rate-card-form"
+import {
+  countryLabel,
+  decimal,
+  describeBands,
+  describeCountries,
+  describeFreeOver,
+  emptyForm,
+  formToRateCard,
+  freeOverCurrencies,
+  rateCardToForm,
+  removeCountry,
+  type RateCardForm,
+} from "../rate-card-form"
 
 const form = (over: Partial<RateCardForm> = {}): RateCardForm => ({
   name: "UK tracked",
@@ -194,6 +206,75 @@ describe("rate-card form", () => {
   it("labels a country by name and code", () => {
     expect(countryLabel("fr", "en")).toBe("France (FR)")
     expect(countryLabel("is", "en")).toBe("Iceland (IS)")
+  })
+
+  it("converts free-delivery thresholds, leaving an empty one out", () => {
+    const r = formToRateCard(form({ free_over: { gbp: "40", eur: " " } }))
+    expect(r.ok && r.body.rate_card.free_over).toEqual({ gbp: 40 })
+    const none = formToRateCard(form({ free_over: { gbp: "" } }))
+    expect(none.ok && none.body.rate_card).not.toHaveProperty("free_over")
+    expect(formToRateCard(form({ free_over: { gbp: "39,50" } }))).toMatchObject({ ok: true, body: { rate_card: { free_over: { gbp: 39.5 } } } })
+  })
+
+  it("validates a threshold like a band price", () => {
+    expect(formToRateCard(form({ free_over: { gbp: "-1" } }))).toEqual({ ok: false, errors: { "free_over.gbp": "shipping.errors.freeOver" } })
+    expect(formToRateCard(form({ free_over: { gbp: "1,250" } }))).toEqual({ ok: false, errors: { "free_over.gbp": "shipping.errors.ambiguousComma" } })
+  })
+
+  it("round-trips a card's thresholds, other currencies included", () => {
+    const stored = {
+      id: "so_1",
+      name: "UK tracked",
+      service_zone: { id: "serzo_1", name: "UK", location: null },
+      shipping_profile: { id: "sp_1", name: "PT" },
+      price_type: "calculated",
+      rate_card: {
+        method: "tracked",
+        currency_code: "gbp",
+        bands: [{ max_weight: null, prices: { gbp: 3.95, eur: 4.5 } }],
+        free_over: { gbp: 40, usd: 60 },
+      },
+      card_issue: null,
+    }
+    const f = rateCardToForm(stored)
+    expect(f.free_over).toEqual({ gbp: "40", usd: "60" })
+    // The card's own currency, its bands' others, then any with a threshold.
+    expect(freeOverCurrencies(f)).toEqual(["gbp", "eur", "usd"])
+    const back = formToRateCard(f)
+    expect(back.ok && back.body.rate_card).toEqual(stored.rate_card)
+    // Emptying one drops it from the card (the update route writes null over it).
+    const dropped = formToRateCard({ ...f, free_over: { ...f.free_over, usd: "" } })
+    expect(dropped.ok && dropped.body.rate_card.free_over).toEqual({ gbp: 40 })
+    expect(describeFreeOver(stored.rate_card)).toEqual([
+      { currency: "gbp", amount: 40 },
+      { currency: "usd", amount: 60 },
+    ])
+    expect(freeOverCurrencies(form({ currency_code: "G" }))).toEqual([])
+  })
+
+  it("offers a threshold in a currency only the per-country bands price in", () => {
+    const f = form({
+      bands: [{ max_weight: "", price: "8" }],
+      countries: { it: [{ max_weight: null, prices: { gbp: 9, eur: 10 } }] },
+    })
+    expect(freeOverCurrencies(f)).toEqual(["gbp", "eur"])
+  })
+
+  it("loads stored numbers as plain decimals, so an unchanged card saves", () => {
+    expect([decimal(1e-7), decimal(40), decimal(3.95), decimal(1e21)]).toEqual(["0.0000001", "40", "3.95", "1000000000000000000000"])
+    const stored = {
+      id: "so_1",
+      name: "UK tracked",
+      service_zone: { id: "serzo_1", name: "UK", location: null },
+      shipping_profile: { id: "sp_1", name: "PT" },
+      price_type: "calculated",
+      rate_card: { method: "tracked", currency_code: "gbp", bands: [{ max_weight: null, prices: { gbp: 1e-7 } }], free_over: { gbp: 1e-7 } },
+      card_issue: null,
+    }
+    const f = rateCardToForm(stored)
+    expect([f.bands[0].price, f.free_over]).toEqual(["0.0000001", { gbp: "0.0000001" }])
+    const back = formToRateCard(f)
+    expect(back.ok && back.body.rate_card).toEqual(stored.rate_card)
   })
 
   it("describes bands", () => {

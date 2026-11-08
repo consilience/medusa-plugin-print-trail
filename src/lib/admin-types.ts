@@ -60,6 +60,9 @@ export type RateCardDto = {
   // Per-country bands, by lower-case ISO 3166-1 alpha-2 code; absent when
   // the card has none.
   countries?: Record<string, RateBandDto[]>
+  // Free-delivery thresholds, by lower-case currency code, in major units;
+  // absent when the card has none.
+  free_over?: Record<string, number>
 }
 export type SkuCheckDto = { sku: string | null; status: string; checked_at: string; matched_sku?: string; note?: string }
 export type SendInputDto = { order_id: string; sequence?: number; source_ref?: string; reissue_of?: number }
@@ -104,6 +107,63 @@ export type ConnectionView = {
   // API, or no call yet). Shown only; never gates behaviour.
   api_version: { version: string; seen_at: string } | null
 }
+
+// Settings → Print Trail's editable settings (GET /admin/print-trail/settings).
+// key: a SettingKey (src/lib/settings.ts). value: in force; config: the
+// plugin options' value. source: admin while a value saved in the admin
+// overrides the config; ignored when the value saved there no longer
+// parses, so the config's applies. changed_at and changed_by: the last save or reset
+// in the admin (null when never changed there); a user no longer found has
+// only an id.
+export type SettingKeyDto =
+  | "orderNumberPrefix"
+  | "defaultShippingMethod"
+  | "confirmOn"
+  | "strictSkus"
+  | "stockSync.enabled"
+  | "reconcile.enabled"
+  | "reconcile.lookbackDays"
+  | "autoComplete"
+  | "notifications.shipment"
+  | "notifications.cancelTooLate"
+  | "notifications.adminEmail"
+  | "stockLocationIds"
+
+export type SettingValueDto = string | number | boolean | string[]
+
+export type SettingView = {
+  key: SettingKeyDto
+  value: SettingValueDto
+  config: SettingValueDto
+  source: "config" | "admin" | "ignored"
+  changed_at: string | null
+  changed_by: { id: string; email: string | null; name: string | null } | null
+}
+
+export type SettingsView = {
+  settings: SettingView[]
+  choices: {
+    shippingMethods: { code: string; name: string }[]
+    shippingMethodsSource: "print-trail" | "fallback"
+    stockLocations: { id: string; name: string | null }[]
+    confirmOn: string[]
+  }
+  limits: { prefixMaxLength: number; lookbackDays: { min: number; max: number }; adminEmails: number }
+}
+
+// POST /admin/print-trail/settings and DELETE …/settings/:key: saved (with
+// warnings, such as a shipping method that couldn't be checked), or nothing
+// saved until the admin confirms a prefix that could repeat order numbers
+// already sent (partial: the scan stopped before reading every order, so
+// numbers may be empty), or a switch to confirming when placed that would
+// confirm orders waiting for payment (count). A save confirms each by its
+// reason, in confirm.
+export type ConfirmReasonDto = "prefix-may-repeat" | "confirms-awaiting-payment"
+
+export type SaveSettingsResult =
+  | { status: "saved"; keys: SettingKeyDto[]; warnings: string[]; view: SettingsView }
+  | { status: "needs-confirmation"; reason: "prefix-may-repeat"; numbers: string[]; partial: boolean }
+  | { status: "needs-confirmation"; reason: "confirms-awaiting-payment"; count: number }
 
 export type ConnectionTestResult = {
   diagnosis: Diagnosis

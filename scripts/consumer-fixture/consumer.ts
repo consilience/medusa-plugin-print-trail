@@ -9,6 +9,7 @@ import { printTrailOptionsFromEnv, type PrintTrailCredentials } from "medusa-plu
 import printTrailModule, { PRINT_TRAIL_MODULE } from "medusa-plugin-print-trail/modules/printTrail"
 import printTrailProvider from "medusa-plugin-print-trail/providers/print-trail"
 import {
+  printTrailCalculatedShippingContext,
   printTrailShippingMethods,
   printTrailShippingOptionInput,
   validateRateCard,
@@ -78,3 +79,22 @@ export async function syncNow(container: MedusaContainer): Promise<string> {
 sendOrderToPrintTrailWorkflow.hooks.payload(async ({ order, payload }) =>
   new StepResponse({ payload: { ...payload, purchaseOrder: String(order.metadata?.po_number ?? "") || undefined } })
 )
+
+// A store's own setCalculatedShippingPricingContext handler (Medusa 2.20.0+)
+// composing the plugin's. Typed here rather than from the hook, which 2.17.2
+// doesn't have.
+type PricingContextHandler = (
+  input: { input: { cart_id: string; shipping_options: { id: string }[] } },
+  context: { container: MedusaContainer }
+) => Promise<StepResponse<Record<string, unknown> | undefined>>
+export const pricingContext: PricingContextHandler = async (args, context) => {
+  const ours = await printTrailCalculatedShippingContext(args, context)
+  const itemTotal: number | undefined = ours.output.item_total
+  return new StepResponse({ item_total: itemTotal, customer_group: "trade" })
+}
+export const registered: PricingContextHandler = printTrailCalculatedShippingContext
+
+export async function noCart(container: MedusaContainer): Promise<void> {
+  // @ts-expect-error the hook's input carries the cart id
+  await printTrailCalculatedShippingContext({ input: {} }, { container })
+}

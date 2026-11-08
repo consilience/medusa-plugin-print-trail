@@ -17,6 +17,7 @@ import { useTranslation } from "react-i18next"
 import { Link } from "react-router-dom"
 import type { ConnectionTestResult, ConnectionView, SkuHealthView } from "../../../../lib/admin-types"
 import { hasHealthNotices, HealthNotices } from "../../../components/health-notices"
+import { SettingsSection } from "../../../components/settings-section"
 import { api, errorOf, keys } from "../../../lib/api"
 import { CONFIG_SNIPPET, ENV_SNIPPET, formatDate } from "../../../lib/format"
 import { confirmationSteps } from "../../../lib/webhook-confirm"
@@ -426,55 +427,17 @@ const SkuHealthSection = ({
   )
 }
 
-const OptionsSection = ({ view }: { view: ConnectionView }) => {
+// Set in medusa-config.ts and the environment, read at startup.
+const DeploymentSection = ({ view }: { view: ConnectionView }) => {
   const { t } = useTranslation("printTrail")
   const o = view.options
-  const onOff = (v: boolean) => (v ? t("settings.options.on") : t("settings.options.off"))
-  const template = (v: string | false) => (v === false ? t("settings.options.off") : v)
   return (
-    <Section title={t("settings.options.heading")}>
+    <Section title={t("settings.deployment.heading")}>
       <div className="px-6 py-3">
         <Text size="small" leading="compact" className="text-ui-fg-subtle">
-          {t("settings.options.help")}
+          {t("settings.deployment.help")}
         </Text>
       </div>
-      <Row label={t("settings.options.orderNumberPrefix")}>
-        <Value>{o.orderNumberPrefix || t("common.none")}</Value>
-      </Row>
-      <Row label={t("settings.options.defaultShippingMethod")}>
-        <Value>{o.defaultShippingMethod}</Value>
-      </Row>
-      <Row label={t("settings.options.confirmOn")}>
-        <Value>{o.confirmOn}</Value>
-      </Row>
-      <Row label={t("settings.options.strictSkus")}>
-        <Value>{onOff(o.strictSkus)}</Value>
-      </Row>
-      <Row label={t("settings.options.stockSync")}>
-        <Value>{onOff(o.stockSync)}</Value>
-      </Row>
-      <Row label={t("settings.options.reconcile")}>
-        <Value>{o.reconcile.enabled ? t("settings.options.reconcileValue", { days: o.reconcile.lookbackDays }) : onOff(false)}</Value>
-      </Row>
-      <Row label={t("settings.options.autoComplete")}>
-        <Value>{onOff(o.autoComplete)}</Value>
-      </Row>
-      <Row label={t("settings.options.shipmentEmail")}>
-        <Value>{template(o.notifications.shipment)}</Value>
-      </Row>
-      <Row label={t("settings.options.cancelTooLateEmail")}>
-        <Value>{template(o.notifications.cancelTooLate)}</Value>
-      </Row>
-      <Row label={t("settings.options.adminEmails")}>
-        <Value>
-          {o.notifications.adminEmailCount
-            ? t("settings.options.adminEmailCount", { count: o.notifications.adminEmailCount })
-            : t("common.notSet")}
-        </Value>
-      </Row>
-      <Row label={t("settings.options.stockLocations")}>
-        <Value>{o.stockLocationIds?.length ? o.stockLocationIds.join(", ") : t("settings.options.allLocations")}</Value>
-      </Row>
       <Row label={t("settings.options.appUrl")}>
         <Value>{o.appUrl ?? t("common.default")}</Value>
       </Row>
@@ -726,7 +689,8 @@ const SettingsPage = () => {
             onSync={() => syncStock.mutate()}
             syncing={syncStock.isPending}
           />
-          <OptionsSection view={view} />
+          <SettingsSection />
+          <DeploymentSection view={view} />
         </>
       )}
     </div>

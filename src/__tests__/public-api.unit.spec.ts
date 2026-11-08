@@ -17,7 +17,13 @@ describe("the public API", () => {
     expect(typeof shippingOptions.validateRateCard).toBe("function")
     expect(typeof shippingOptions.printTrailShippingOptionInput).toBe("function")
     expect(typeof shippingOptions.printTrailShippingMethods).toBe("function")
-    expect(Object.keys(shippingOptions).sort()).toEqual(["printTrailShippingMethods", "printTrailShippingOptionInput", "validateRateCard"])
+    expect(typeof shippingOptions.printTrailCalculatedShippingContext).toBe("function")
+    expect(Object.keys(shippingOptions).sort()).toEqual([
+      "printTrailCalculatedShippingContext",
+      "printTrailShippingMethods",
+      "printTrailShippingOptionInput",
+      "validateRateCard",
+    ])
   })
 
   it("package.json exports exactly the public entries, with no pattern", () => {

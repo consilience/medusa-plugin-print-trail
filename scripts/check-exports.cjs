@@ -56,7 +56,10 @@ const entries = {
   "/providers/print-trail": (m) => (m.default && Array.isArray(m.default.services) ? null : "no default.services"),
   "/stock": (m) => isFunction(m, "requestStockSync") || isFunction(m, "describeStockResult"),
   "/shipping-options": (m) =>
-    isFunction(m, "validateRateCard") || isFunction(m, "printTrailShippingOptionInput") || isFunction(m, "printTrailShippingMethods"),
+    isFunction(m, "validateRateCard") ||
+    isFunction(m, "printTrailShippingOptionInput") ||
+    isFunction(m, "printTrailShippingMethods") ||
+    isFunction(m, "printTrailCalculatedShippingContext"),
 }
 for (const [entry, expect] of Object.entries(entries)) {
   check(`${NAME}${entry}`, () => expect(load(NAME + entry)))

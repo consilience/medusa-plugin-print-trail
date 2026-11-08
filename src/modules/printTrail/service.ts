@@ -11,6 +11,8 @@ import { LOCKING_CHECK_STATE_KEY, type LockingCheck } from "../../lib/locking-ch
 import { PRE_ORDER_SEEN_PREFIX } from "../../lib/pre-order"
 import { normaliseSku } from "../../lib/sku"
 import type { SkuCheck, SkuCheckStatus } from "../../lib/sku-check"
+import { SETTING_KEYS, settingStateKey, type SettingKey, type SettingRecord } from "../../lib/settings"
+import { EffectiveOptions } from "../../lib/settings-cache"
 import { createEachUnlessExists } from "../../lib/state-queue"
 import { checkColumns, type CheckColumns, type CheckSource, type VariantCheckRow } from "../../lib/variant-checks"
 import { PrintTrailClient, STATUS_CLIENT_TUNING, type RateLimitGate } from "./client/client"
@@ -67,6 +69,8 @@ class PrintTrailModuleService extends MedusaService({
   private readonly onStatus_: (status: number, path: string, problemType?: string | null) => void
   // Records the Print Trail API version either client hears (display only).
   private readonly onApiVersion_: (version: string, path: string) => void
+  // The options in force: config with the admin's settings over it.
+  private readonly effective_: EffectiveOptions
 
   constructor(container: Record<string, unknown>, options?: Partial<PrintTrailPluginOptions>) {
     super(...arguments)
@@ -92,6 +96,11 @@ class PrintTrailModuleService extends MedusaService({
       track(status, path, problemType)
     }
     this.onApiVersion_ = createApiVersionTracker(this, logger)
+    this.effective_ = new EffectiveOptions({
+      config: this.options_,
+      read: () => this.readSettingRecords(),
+      warn: (m) => logger?.warn(m),
+    })
   }
 
   async accessRefusalCount(): Promise<number> {
@@ -112,8 +121,70 @@ class PrintTrailModuleService extends MedusaService({
     }
   }
 
+  // The options in force, read at run time (src/lib/settings-cache.ts).
   async getOptions(): Promise<PrintTrailPluginOptions> {
+    return this.effective_.get()
+  }
+
+  // The options in force read now, past the cache: the confirm gate's.
+  async getFreshOptions(): Promise<PrintTrailPluginOptions> {
+    return this.effective_.fresh()
+  }
+
+  // The plugin options as configured, with no admin settings.
+  async getConfigOptions(): Promise<PrintTrailPluginOptions> {
     return this.options_
+  }
+
+  // The next getOptions() reads the settings again.
+  async invalidateOptions(): Promise<void> {
+    this.effective_.clear()
+  }
+
+  async readSettingRecords(): Promise<Partial<Record<SettingKey, SettingRecord>>> {
+    const rows = await this.listPrintTrailStates({ key: SETTING_KEYS.map(settingStateKey) })
+    const out: Partial<Record<SettingKey, SettingRecord>> = {}
+    for (const key of SETTING_KEYS) {
+      const row = rows.find((r) => r.key === settingStateKey(key))
+      const value = row?.value as SettingRecord | null | undefined
+      if (value && typeof value === "object" && typeof value.overridden === "boolean") out[key] = value
+    }
+    return out
+  }
+
+  // Replaces each key's record, all in one transaction (a row per key, its
+  // value cleared then written, as setState does), so a save is all or
+  // nothing. The cache is cleared whatever happens. Another writer creating
+  // the same key first makes the transaction fail; the admin saves again.
+  async writeSettingRecords(records: Partial<Record<SettingKey, SettingRecord>>): Promise<void> {
+    try {
+      await this.writeSettingRecordsAtomically(records)
+    } finally {
+      await this.invalidateOptions()
+    }
+  }
+
+  @InjectTransactionManager()
+  protected async writeSettingRecordsAtomically(
+    records: Partial<Record<SettingKey, SettingRecord>>,
+    @MedusaContext() sharedContext: Context = {}
+  ): Promise<void> {
+    const entries = Object.entries(records) as [SettingKey, SettingRecord][]
+    if (!entries.length) return
+    const keys = entries.map(([key]) => settingStateKey(key))
+    const existing = new Map(
+      (await this.listPrintTrailStates({ key: keys }, { select: ["id", "key"] }, sharedContext)).map((r) => [r.key, r.id])
+    )
+    for (const [key, record] of entries) {
+      const id = existing.get(settingStateKey(key))
+      const value = record as unknown as Record<string, unknown>
+      if (id) {
+        await this.updatePrintTrailStates({ id, value: null }, sharedContext)
+        await this.updatePrintTrailStates({ id, value }, sharedContext)
+      } else {
+        await this.createPrintTrailStates({ key: settingStateKey(key), value }, sharedContext)
+      }
+    }
   }
 
   async isConnected(): Promise<boolean> {

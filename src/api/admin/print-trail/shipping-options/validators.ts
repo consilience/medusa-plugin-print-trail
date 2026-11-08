@@ -20,6 +20,8 @@ const RateCardInput = z.object({
   bands: Bands,
   // Per-country bands, keyed by ISO 3166-1 alpha-2 code; null is not listed.
   countries: z.record(z.string(), Bands.nullable()).nullish(),
+  // Free-delivery thresholds by currency code; null is not listed.
+  free_over: z.record(z.string(), z.number().nonnegative().nullable()).nullish(),
 })
 
 export const PostPrintTrailShippingOptionSchema = z.object({

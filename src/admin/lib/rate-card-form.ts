@@ -15,6 +15,9 @@ export type RateCardForm = {
   // The per-country bands, which the editor shows but doesn't edit; carried
   // through an edit untouched, or saving the default bands would drop them.
   countries?: RateCardDto["countries"]
+  // Free-delivery thresholds as entered, by lower-case currency code; an
+  // empty one is no threshold in that currency.
+  free_over?: Record<string, string>
 }
 
 export type RateCardFormResult =
@@ -72,6 +75,16 @@ export function formToRateCard(f: RateCardForm): RateCardFormResult {
     return { max_weight, prices: { ...others, [currency]: price ?? 0 } }
   })
 
+  // Thresholds, read as band prices are; an empty one is left out.
+  const freeOver: Record<string, number> = {}
+  for (const [code, entered] of Object.entries(f.free_over ?? {})) {
+    if (!entered.trim()) continue
+    const amount = ambiguousComma(entered) ? null : parseNumber(entered)
+    if (ambiguousComma(entered)) errors[`free_over.${code}`] = "shipping.errors.ambiguousComma"
+    else if (amount === null) errors[`free_over.${code}`] = "shipping.errors.freeOver"
+    else freeOver[code] = amount
+  }
+
   // Changing the card's currency needs every country's bands priced in it.
   if (/^[a-z]{3}$/.test(currency) && Object.values(f.countries ?? {}).some((list) => list.some((b) => typeof b.prices?.[currency] !== "number"))) {
     errors.countries = "shipping.errors.countriesCurrency"
@@ -84,9 +97,21 @@ export function formToRateCard(f: RateCardForm): RateCardFormResult {
       name: f.name.trim(),
       service_zone_id: f.service_zone_id,
       shipping_profile_id: f.shipping_profile_id,
-      rate_card: { method: f.method, currency_code: currency, bands, ...(f.countries ? { countries: f.countries } : {}) },
+      rate_card: {
+        method: f.method,
+        currency_code: currency,
+        bands,
+        ...(f.countries ? { countries: f.countries } : {}),
+        ...(Object.keys(freeOver).length ? { free_over: freeOver } : {}),
+      },
     },
   }
+}
+
+// A stored number as the form's parser reads it: plain decimal digits, never
+// an exponent (String(1e-7) is "1e-7", which parseNumber refuses).
+export function decimal(n: number): string {
+  return n.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 })
 }
 
 export function rateCardToForm(option: ShippingOptionView): RateCardForm {
@@ -100,13 +125,33 @@ export function rateCardToForm(option: ShippingOptionView): RateCardForm {
     currency_code: currency.toUpperCase(),
     bands: card?.bands.length
       ? card.bands.map((b) => ({
-          max_weight: b.max_weight === null ? "" : String(b.max_weight),
-          price: b.prices[currency] === undefined ? "" : String(b.prices[currency]),
+          max_weight: b.max_weight === null ? "" : decimal(b.max_weight),
+          price: b.prices[currency] === undefined ? "" : decimal(b.prices[currency]),
           other_prices: Object.fromEntries(Object.entries(b.prices).filter(([c]) => c !== currency)),
         }))
       : emptyForm().bands,
     ...(card?.countries ? { countries: card.countries } : {}),
+    ...(card?.free_over ? { free_over: Object.fromEntries(Object.entries(card.free_over).map(([c, v]) => [c, decimal(v)])) } : {}),
   }
+}
+
+// The currencies the editor offers a threshold in: the card's own, those
+// its default and per-country bands price in, and any that already has one,
+// card's first.
+export function freeOverCurrencies(f: RateCardForm): string[] {
+  const own = f.currency_code.trim().toLowerCase()
+  const codes = new Set<string>(/^[a-z]{3}$/.test(own) ? [own] : [])
+  for (const band of f.bands) for (const code of Object.keys(band.other_prices ?? {})) codes.add(code)
+  for (const bands of Object.values(f.countries ?? {})) for (const band of bands) for (const code of Object.keys(band.prices ?? {})) codes.add(code)
+  for (const code of Object.keys(f.free_over ?? {})) codes.add(code)
+  return [...codes]
+}
+
+// The thresholds for the card summary, card's currency first.
+export function describeFreeOver(card: RateCardDto): { currency: string; amount: number }[] {
+  return Object.entries(card.free_over ?? {})
+    .sort(([a], [b]) => (a === card.currency_code ? -1 : b === card.currency_code ? 1 : a.localeCompare(b)))
+    .map(([currency, amount]) => ({ currency, amount }))
 }
 
 // "France (FR)": the browser's own country names, so the admin bundle

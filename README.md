@@ -101,7 +101,9 @@ They create the plugin's tables and its link to orders. Then start Medusa, or re
 
 Variants are matched to Print Trail by SKU. Where Print Trail's SKU differs, set it in the Print Trail panel on the variant page.
 
-Before taking live orders, cancel any open test orders (the plugin sends open orders with Print Trail lines from the last 7 days), and switch payments and Print Trail credentials to live together.
+The business settings (the order number prefix, when orders are confirmed, the stock sync, the email templates and admin addresses, and the rest) can be changed on the Settings → Print Trail page in the Medusa admin, with no restart. A value saved there overrides the plugin options until it is reset.
+
+Before taking live orders, cancel any open test orders (the plugin sends open orders with Print Trail lines from the reconcile look-back, 7 days by default and editable on the settings page), and switch payments and Print Trail credentials to live together.
 
 ## Documentation
 

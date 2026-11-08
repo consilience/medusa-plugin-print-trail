@@ -51,12 +51,12 @@ export function validateRateCard(
 }
 
 // Medusa's own create form sends the chosen fulfilment option ({ id, name,
-// method }) as data; a rate card has bands, a currency or countries (Medusa
-// merges data, so countries alone would land in the stored card unchecked).
+// method }) as data; a rate card has bands, a currency, countries or free_over
+// (Medusa merges data, so countries or free_over alone would land in the
+// stored card unchecked).
+const CARD_KEYS = ["bands", "currency_code", "countries", "free_over"] as const
 export function looksLikeRateCard(data: unknown): boolean {
-  return (
-    !!data && typeof data === "object" && !Array.isArray(data) && ("bands" in data || "currency_code" in data || "countries" in data)
-  )
+  return !!data && typeof data === "object" && !Array.isArray(data) && CARD_KEYS.some((key) => key in data)
 }
 
 export function rateCardData(card: RateCard): Record<string, unknown> {
@@ -64,17 +64,24 @@ export function rateCardData(card: RateCard): Record<string, unknown> {
 }
 
 // The data that replaces a stored card. Medusa merges a shipping option's
-// data on update (nested objects too; arrays are replaced), so a country
-// left out of the new card would survive: write null over each one dropped,
-// or over the whole map when the new card has none. The schema reads null
-// as not listed.
+// data on update (nested objects too; arrays are replaced), so a country or a
+// currency's threshold left out of the new card would survive: write null
+// over each one dropped, or over the whole map when the new card has none.
+// The schema reads null as not listed.
 export function updateData(stored: Record<string, unknown> | null | undefined, card: RateCard): Record<string, unknown> {
   const data = rateCardData(card)
-  const old = stored?.countries
-  if (!old || typeof old !== "object" || Array.isArray(old)) return data
-  if (!card.countries) return { ...data, countries: null }
-  const dropped = Object.keys(old).filter((code) => !(code in card.countries!))
-  return dropped.length ? { ...data, countries: { ...card.countries, ...Object.fromEntries(dropped.map((c) => [c, null])) } } : data
+  for (const key of ["countries", "free_over"] as const) {
+    const old = stored?.[key]
+    if (!old || typeof old !== "object" || Array.isArray(old)) continue
+    const next = card[key] as Record<string, unknown> | undefined
+    if (!next) {
+      data[key] = null
+      continue
+    }
+    const dropped = Object.keys(old).filter((code) => !Object.prototype.hasOwnProperty.call(next, code))
+    if (dropped.length) data[key] = { ...next, ...Object.fromEntries(dropped.map((c) => [c, null])) }
+  }
+  return data
 }
 
 export function createInput(
@@ -127,6 +134,10 @@ const rawCard = (data: Record<string, unknown>): RateCardDto | null => {
       Object.entries(data.countries).flatMap(([code, bands]) => (bands === null ? [] : [[code, rawBands(bands)]]))
     )
   }
+  if (data.free_over && typeof data.free_over === "object" && !Array.isArray(data.free_over)) {
+    const amounts = Object.entries(data.free_over).filter((e): e is [string, number] => typeof e[1] === "number")
+    if (amounts.length) card.free_over = Object.fromEntries(amounts)
+  }
   return card
 }
 
@@ -138,8 +149,8 @@ export function toShippingOptionView(option: unknown, methods: string[]): Shippi
   if (data && looksLikeRateCard(data)) {
     const valid = validateRateCard(data, methods)
     if (valid.ok) {
-      const { method, currency_code, bands, countries } = valid.card
-      rate_card = { method, currency_code, bands, ...(countries ? { countries } : {}) }
+      const { method, currency_code, bands, countries, free_over } = valid.card
+      rate_card = { method, currency_code, bands, ...(countries ? { countries } : {}), ...(free_over ? { free_over } : {}) }
       card_issue = null
     } else {
       rate_card = rawCard(data)
@@ -222,8 +233,8 @@ function unsafeKeyPath(value: unknown, path: string[] = []): string | null {
   return null
 }
 
-const COUNTRIES_ALONE =
-  "countries needs a rate card to join: send method, currency_code and bands with it, or update an option that has a card"
+const alone = (key: string) =>
+  `${key} needs a rate card to join: send method, currency_code and bands with it, or update an option that has a card`
 
 // For Medusa's own /admin/shipping-options routes: a Print Trail option's
 // card-shaped data must be a valid card. On update (`stored` given) the card
@@ -249,29 +260,34 @@ export function guardShippingOptionData(input: {
   if (!looksLikeRateCard(merged)) return { ok: true }
   const card = merged as Record<string, unknown>
   if (!("bands" in card) && !("currency_code" in card)) {
-    return { ok: false, issues: [{ path: "countries", message: COUNTRIES_ALONE }] }
+    const key = "countries" in card ? "countries" : "free_over"
+    return { ok: false, issues: [{ path: key, message: alone(key) }] }
   }
   const valid = validateRateCard(merged, input.methods)
   const issues = valid.ok ? [] : [...valid.issues]
   // Medusa stores the body as sent, and its merge would keep an `FR` beside a
-  // stored `fr`; the plugin's routes lower-case codes, these can't, so they
-  // refuse them. A null (a removal) may name any case.
+  // stored `fr` (or a `GBP` threshold beside `gbp`); the plugin's routes
+  // lower-case codes, these can't, so they refuse them. A null (a removal)
+  // may name any case.
   // A null removes the stored key it names exactly (an old upper-case one
   // too); one that names none would be a 200 that removes nothing, so it is
   // refused rather than guessed at by case.
-  const sent = isPlainObject(input.data) ? input.data.countries : undefined
-  const storedCountries = isPlainObject(input.stored?.countries) ? input.stored.countries : {}
-  if (isPlainObject(sent)) {
-    for (const [code, bands] of Object.entries(sent)) {
-      if (bands === null && !Object.prototype.hasOwnProperty.call(storedCountries, code)) {
+  const maps = [
+    { key: "countries", what: "country", codes: "country codes" },
+    { key: "free_over", what: "free-delivery threshold in", codes: "currency codes" },
+  ] as const
+  for (const { key, what, codes } of maps) {
+    const sent = isPlainObject(input.data) ? input.data[key] : undefined
+    const storedMap = isPlainObject(input.stored?.[key]) ? (input.stored[key] as Record<string, unknown>) : {}
+    if (!isPlainObject(sent)) continue
+    for (const [code, value] of Object.entries(sent)) {
+      if (value === null && !Object.prototype.hasOwnProperty.call(storedMap, code)) {
+        issues.push({ path: `${key}.${code}`, message: `This card has no ${what} "${code}" to remove (${codes} are matched exactly)` })
+      } else if (value !== null && code !== code.toLowerCase()) {
+        const kind = key === "countries" ? "country" : "currency"
         issues.push({
-          path: `countries.${code}`,
-          message: `This card has no country "${code}" to remove (country codes are matched exactly)`,
-        })
-      } else if (bands !== null && code !== code.toLowerCase()) {
-        issues.push({
-          path: `countries.${code}`,
-          message: `Use a lower-case country code here ("${code.toLowerCase()}"): Medusa stores the card as sent`,
+          path: `${key}.${code}`,
+          message: `Use a lower-case ${kind} code here ("${code.toLowerCase()}"): Medusa stores the card as sent`,
         })
       }
     }

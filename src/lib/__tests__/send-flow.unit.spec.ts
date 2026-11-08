@@ -17,7 +17,7 @@ import {
   type SendStore,
 } from "../send-flow"
 import { memoryPreOrderSeen } from "../pre-order"
-import { dueRows } from "../sweep"
+import { awaitingPaymentRows, dueRows } from "../sweep"
 
 const TOKEN = "flow-token"
 const NOW = new Date("2026-10-18T12:00:00Z")
@@ -1157,6 +1157,101 @@ describe("sendOrderToPrintTrail steps", () => {
     await send(order(), [line("978-A")], 1, { orderNumber: "SHOP-77" })
     const theirs = await createDraft(ctx, { order: order({ id: "order_other", display_id: 77 }), lines: [line("978-A")], sequence: 1 })
     expect(theirs).toMatchObject({ rowId: original.id, outcome: "draft" })
+  })
+})
+
+// Settings changed in the admin (or the config) while orders are in flight.
+describe("settings changed while an order is in flight", () => {
+  const confirms = () => mock.state.requests.filter((r) => r.method === "PUT" && r.path.endsWith("/confirm"))
+  const captured = (over: Partial<GraphOrder> = {}) => order({ payment_collections: [{ captured_amount: 10, refunded_amount: 0 }], ...over })
+
+  it("an order sent before a prefix change keeps its Print Trail order number", async () => {
+    ctx.options = { ...ctx.options, confirmOn: "payment.captured" }
+    const first = await send(order(), [line("978-A")])
+    expect(first.gate.reason).toBe("awaiting-payment")
+    expect(first.row?.pt_order_number).toBe("ORD-1001")
+
+    ctx.options = { ...ctx.options, orderNumberPrefix: "WEB-" }
+    const again = await send(captured(), [line("978-A")])
+    expect(again.confirmed?.outcome).toBe("confirmed")
+    expect(again.row?.pt_order_number).toBe("ORD-1001")
+    expect(posts().map((p) => p.body.orderNumber)).toEqual(["ORD-1001", "ORD-1001"])
+
+    // A new order takes the prefix in force.
+    const next = await send(captured({ id: "order_2", display_id: 1002 }), [line("978-A")])
+    expect(next.row?.pt_order_number).toBe("WEB-1002")
+  })
+
+  it("confirm on payment, then on placing: an order waiting for payment is confirmed once at its next step", async () => {
+    ctx.options = { ...ctx.options, confirmOn: "payment.captured" }
+    const waiting = await send(order(), [line("978-A")])
+    expect(waiting.row).toMatchObject({ block_reason: "awaiting-payment", pending_action: null, confirmed_at: null })
+    expect(confirms()).toHaveLength(0)
+
+    ctx.options = { ...ctx.options, confirmOn: "order.placed" }
+    const due = awaitingPaymentRows(store.rows, [{ id: "order_1", created_at: NOW }], NOW, 7, new Date(NOW.getTime() + 1))
+    expect(due).toEqual([{ order_id: "order_1", sequence: 1 }])
+    const next = await send(order(), [line("978-A")])
+    expect(next.confirmed?.outcome).toBe("confirmed")
+    expect(next.row).toMatchObject({ block_reason: null, confirmed_at: NOW })
+    expect(confirms()).toHaveLength(1)
+
+    // Never twice: the row is no longer picked, and another run confirms nothing.
+    expect(awaitingPaymentRows(store.rows, [{ id: "order_1", created_at: NOW }], NOW, 7, new Date(NOW.getTime() + 1))).toEqual([])
+    const after = await send(order(), [line("978-A")])
+    expect(after.gate.reason).toBe("already-confirmed")
+    expect(confirms()).toHaveLength(1)
+  })
+
+  it("confirm on placing, then on payment: an order not yet confirmed waits for the capture, then is confirmed once", async () => {
+    // The request and the client's one retry.
+    mock.fail(/\/confirm$/, 503, { message: "down" }, 2)
+    const first = await send(order(), [line("978-A")])
+    expect(first.row).toMatchObject({ pending_action: "confirm", confirmed_at: null })
+
+    ctx.options = { ...ctx.options, confirmOn: "payment.captured" }
+    const retry = await send(order(), [line("978-A")])
+    expect(retry.gate.reason).toBe("awaiting-payment")
+    expect(retry.row).toMatchObject({ block_reason: "awaiting-payment", confirmed_at: null })
+    // Under payment.captured the sweep leaves it to the capture.
+    const confirmsBefore = confirms().length
+
+    const paid = await send(captured(), [line("978-A")])
+    expect(paid.confirmed?.outcome).toBe("confirmed")
+    expect(confirms()).toHaveLength(confirmsBefore + 1)
+    const after = await send(captured(), [line("978-A")])
+    expect(after.gate.reason).toBe("already-confirmed")
+    expect(confirms()).toHaveLength(confirmsBefore + 1)
+  })
+
+  it("a gate that can't read the settings confirms nothing; the lease brings the send back, and the gate then decides", async () => {
+    // The run's create step stores the uuid and leases the confirm; its gate
+    // step then fails reading the settings (the database is down), so the
+    // workflow stops there.
+    const create = await createDraft(ctx, { order: order(), lines: [line("978-A")], sequence: 1 })
+    expect(create.rowId).toBeTruthy()
+    expect(confirms()).toHaveLength(0)
+    expect(store.rows[0]).toMatchObject({ pending_action: "confirm", next_attempt_at: new Date("2026-10-18T12:15:00Z"), confirmed_at: null })
+    expect(dueRows(store.rows, new Date("2026-10-18T12:16:00Z"))).toHaveLength(1)
+
+    // The sweep's retry, with the setting as saved meanwhile: unpaid, so it waits.
+    ctx.options = { ...ctx.options, confirmOn: "payment.captured" }
+    const retry = await send(order(), [line("978-A")])
+    expect(retry.gate.reason).toBe("awaiting-payment")
+    expect(retry.row).toMatchObject({ block_reason: "awaiting-payment", confirmed_at: null, pending_action: null })
+    expect(confirms()).toHaveLength(0)
+    // The retry re-posted the draft by its order number and kept the uuid.
+    expect(retry.row?.pt_uuid).toBe(store.rows[0].pt_uuid)
+  })
+
+  it("an order confirmed before a switch to confirm on payment stays confirmed, and isn't confirmed again", async () => {
+    const first = await send(order(), [line("978-A")])
+    expect(first.confirmed?.outcome).toBe("confirmed")
+    ctx.options = { ...ctx.options, confirmOn: "payment.captured" }
+    const again = await send(captured(), [line("978-A")])
+    expect(again.gate.reason).toBe("already-confirmed")
+    expect(again.row?.confirmed_at).toEqual(NOW)
+    expect(confirms()).toHaveLength(1)
   })
 })
 

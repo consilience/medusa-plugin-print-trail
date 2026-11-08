@@ -356,6 +356,78 @@ moduleIntegrationTestRunner<PrintTrailModuleService>({
         expect(await service.getClient()).toBe(await service.getClient())
         expect((await service.getOptions()).defaultShippingMethod).toBe("standard")
       })
+
+      describe("settings saved in the admin", () => {
+        const at = "2026-11-08T12:00:00.000Z"
+        afterEach(() => jest.restoreAllMocks())
+
+        it("override the plugin options at run time, and a reset restores them", async () => {
+          await service.invalidateOptions()
+          expect((await service.getOptions()).orderNumberPrefix).toBe("")
+          await service.writeSettingRecords({
+            orderNumberPrefix: { overridden: true, value: "WEB-", changed_by: "user_1", changed_at: at },
+            "reconcile.lookbackDays": { overridden: true, value: 30, changed_by: "user_1", changed_at: at },
+          })
+          const options = await service.getOptions()
+          expect(options.orderNumberPrefix).toBe("WEB-")
+          expect(options.reconcile).toEqual({ enabled: true, lookbackDays: 30 })
+          expect((await service.getConfigOptions()).orderNumberPrefix).toBe("")
+
+          await service.writeSettingRecords({ orderNumberPrefix: { overridden: false, changed_by: "user_2", changed_at: at } })
+          expect((await service.getOptions()).orderNumberPrefix).toBe("")
+          expect((await service.readSettingRecords()).orderNumberPrefix).toEqual({ overridden: false, changed_by: "user_2", changed_at: at })
+        })
+
+        it("another process's save is seen once the cached options are 5 seconds old", async () => {
+          await service.invalidateOptions()
+          let now = Date.parse(at)
+          jest.spyOn(Date, "now").mockImplementation(() => now)
+          expect((await service.getOptions()).confirmOn).toBe("order.placed")
+          // Written as another process would, without clearing this one's copy.
+          await service.setState("setting:confirmOn", { overridden: true, value: "payment.captured", changed_by: null, changed_at: at })
+          now += 4_000
+          expect((await service.getOptions()).confirmOn).toBe("order.placed")
+          now += 1_000
+          expect((await service.getOptions()).confirmOn).toBe("payment.captured")
+        })
+
+        it("a failed read keeps the options read before, never the plugin options", async () => {
+          await service.writeSettingRecords({ autoComplete: { overridden: true, value: false, changed_by: null, changed_at: at } })
+          expect((await service.getOptions()).autoComplete).toBe(false)
+          const later = Date.now() + 10_000
+          jest.spyOn(Date, "now").mockImplementation(() => later)
+          jest.spyOn(PrintTrailModuleService.prototype, "readSettingRecords").mockRejectedValue(new Error("db down"))
+          expect((await service.getOptions()).autoComplete).toBe(false)
+        })
+
+        it("a save is all or nothing, and clears the cache even when it fails", async () => {
+          await service.writeSettingRecords({ strictSkus: { overridden: true, value: true, changed_by: null, changed_at: at } })
+          expect((await service.getOptions()).strictSkus).toBe(true)
+          const create = PrintTrailModuleService.prototype.createPrintTrailStates
+          let calls = 0
+          jest.spyOn(PrintTrailModuleService.prototype, "createPrintTrailStates").mockImplementation(async function (this: unknown, ...args: unknown[]) {
+            if (++calls === 2) throw new Error("write failed")
+            return (create as (...a: unknown[]) => unknown).apply(this, args) as never
+          })
+          await expect(
+            service.writeSettingRecords({
+              strictSkus: { overridden: false, changed_by: "user_1", changed_at: at },
+              "notifications.adminEmail": { overridden: true, value: ["ops@example.com"], changed_by: "user_1", changed_at: at },
+              "notifications.cancelTooLate": { overridden: true, value: false, changed_by: "user_1", changed_at: at },
+              stockLocationIds: { overridden: true, value: ["sloc_1"], changed_by: "user_1", changed_at: at },
+            })
+          ).rejects.toThrow("write failed")
+          expect(calls).toBe(2)
+          jest.restoreAllMocks()
+          const records = await service.readSettingRecords()
+          expect(records.strictSkus).toEqual({ overridden: true, value: true, changed_by: null, changed_at: at })
+          expect(records["notifications.adminEmail"]).toBeUndefined()
+          expect(records.stockLocationIds).toBeUndefined()
+          // Another process writes; this one's copy was cleared by the failed save.
+          await service.setState("setting:strictSkus", { overridden: true, value: false, changed_by: null, changed_at: at })
+          expect((await service.getOptions()).strictSkus).toBe(false)
+        })
+      })
     })
   },
 })

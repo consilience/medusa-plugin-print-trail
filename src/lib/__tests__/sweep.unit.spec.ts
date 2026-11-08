@@ -2,7 +2,15 @@ import { resolvePluginOptions } from "../../config"
 import { STATE_KEYS } from "../stock"
 import { runLegacyMetadataScan, type StockContext } from "../stock-flow"
 import { runSweepSteps } from "../sweep-steps"
-import { dueCancels, dueRows, findOrdersMissingRows, ordersMissingCancel, sweepWindow, withinLookback } from "../sweep"
+import {
+  awaitingPaymentRows,
+  dueCancels,
+  dueRows,
+  findOrdersMissingRows,
+  ordersMissingCancel,
+  sweepWindow,
+  withinLookback,
+} from "../sweep"
 
 const NOW = new Date("2026-10-18T12:00:00Z")
 const ago = (minutes: number) => new Date(NOW.getTime() - minutes * 60_000)
@@ -51,6 +59,55 @@ describe("dueRows", () => {
   })
 })
 
+describe("awaitingPaymentRows", () => {
+  const row = (order_id: string, over: object = {}) => ({
+    order_id,
+    sequence: 1,
+    block_reason: "awaiting-payment",
+    confirmed_at: null,
+    pending_action: null,
+    cancel_status: null,
+    cancel_requested: false,
+    status: "draft",
+    ...over,
+  })
+  const orders = ["o1", "o2", "o3", "o4", "o5", "o6", "o7"].map((id) => ({ id, created_at: ago(60) }))
+
+  it("picks rows held for payment, within the lookback, with nothing else pending", () => {
+    const rows = [
+      row("o1"),
+      row("o2", { pending_action: "amend" }),
+      row("o3", { confirmed_at: ago(5) }),
+      row("o4", { cancel_status: "requested" }),
+      row("o5", { block_reason: "unmatched-skus" }),
+      row("o6", { status: "cancelled" }),
+      row("o7", { sequence: 2 }),
+      row("too-old"),
+    ]
+    const withOld = [...orders, { id: "too-old", created_at: ago(8 * 24 * 60) }]
+    expect(awaitingPaymentRows(rows, withOld, NOW, 7, NOW)).toEqual([
+      { order_id: "o1", sequence: 1 },
+      { order_id: "o7", sequence: 2 },
+    ])
+  })
+
+  it("follows the lookback days in force", () => {
+    const rows = [row("o1")]
+    const old = [{ id: "o1", created_at: ago(3 * 24 * 60) }]
+    expect(awaitingPaymentRows(rows, old, NOW, 2, NOW)).toEqual([])
+    expect(awaitingPaymentRows(rows, old, NOW, 7, NOW)).toEqual([{ order_id: "o1", sequence: 1 }])
+  })
+
+  it("picks only orders placed before the admin's switch", () => {
+    const rows = [row("o1"), row("o2")]
+    const placed = [
+      { id: "o1", created_at: ago(60) },
+      { id: "o2", created_at: ago(10) },
+    ]
+    expect(awaitingPaymentRows(rows, placed, NOW, 7, ago(30))).toEqual([{ order_id: "o1", sequence: 1 }])
+  })
+})
+
 describe("runSweepSteps", () => {
   it("runs the stock and SKU-check queues even when an earlier step throws", async () => {
     const ran: string[] = []
@@ -64,6 +121,9 @@ describe("runSweepSteps", () => {
         dueRetries: async () => {
           ran.push("due")
           throw new Error("boom")
+        },
+        awaitingPayment: async () => {
+          ran.push("awaiting")
         },
         missedOrders: async () => {
           ran.push("missed")
@@ -81,7 +141,7 @@ describe("runSweepSteps", () => {
       },
       { error: (m: string) => errors.push(m) }
     )
-    expect(ran).toEqual(["confirmed", "due", "missed", "stock", "sku", "legacy"])
+    expect(ran).toEqual(["confirmed", "due", "awaiting", "missed", "stock", "sku", "legacy"])
     expect(errors.join("\n")).toMatch(/boom/)
   })
 })

@@ -89,6 +89,51 @@ describe("PrintTrailFulfillmentService", () => {
     ).rejects.toThrow(/No standard rate/)
   })
 
+  describe("free delivery over a cart total", () => {
+    const free = { ...ukStandard, bands: ukStandard.bands.slice(0, 2), free_over: { gbp: 40 } }
+    const price = (context: Record<string, unknown>) => provider({}).calculatePrice(free, {}, { items: items(800), ...context } as any)
+    const listing = { sales_channel_id: "sc_1", currency_code: "gbp", region_id: "reg_1", total: 50 }
+
+    it("is free at or over the threshold on the cart's option listing", async () => {
+      await expect(price({ ...listing, item_total: 39.99 })).resolves.toEqual({ calculated_amount: 4.49, is_calculated_price_tax_inclusive: false })
+      await expect(price({ ...listing, item_total: 40 })).resolves.toEqual({ calculated_amount: 0, is_calculated_price_tax_inclusive: false })
+      // A BigNumber-like total or a decimal string, as Medusa may pass it.
+      await expect(price({ ...listing, item_total: { valueOf: () => 41 } })).resolves.toMatchObject({ calculated_amount: 0 })
+      await expect(price({ ...listing, item_total: "40.00" })).resolves.toMatchObject({ calculated_amount: 0 })
+    })
+
+    it("compares in the pricing currency only", async () => {
+      const both = { ...free, bands: [{ max_weight: null, prices: { gbp: 4.49, eur: 5 } }] }
+      const p = provider({})
+      await expect(p.calculatePrice(both, {}, { ...listing, currency_code: "eur", item_total: 100, items: items(800) } as any)).resolves.toMatchObject({
+        calculated_amount: 5,
+      })
+    })
+
+    it("is the band price without an item total, as on /calculate", async () => {
+      await expect(price({ currency_code: "gbp" })).resolves.toMatchObject({ calculated_amount: 4.49 })
+      await expect(price({ currency_code: "gbp", item_total: null })).resolves.toMatchObject({ calculated_amount: 4.49 })
+      // With the store's helper: item_total alone, and still not the listing.
+      await expect(price({ currency_code: "gbp", item_total: 40 })).resolves.toMatchObject({ calculated_amount: 0 })
+    })
+
+    it("still has no price over the weight cap", async () => {
+      const p = provider({})
+      await expect(p.calculatePrice(free, {}, { ...listing, item_total: 500, items: items(5000) } as any)).resolves.toEqual({
+        is_calculated_price_tax_inclusive: false,
+      })
+      await expect(p.calculatePrice(free, {}, { currency_code: "gbp", item_total: 500, items: items(5000) } as any)).rejects.toThrow(
+        /No standard rate/
+      )
+    })
+
+    it("leaves a card without free_over at its band price", async () => {
+      await expect(
+        provider({}).calculatePrice(ukStandard, {}, { ...listing, item_total: 1000, items: items(800) } as any)
+      ).resolves.toMatchObject({ calculated_amount: 4.49 })
+    })
+  })
+
   describe("per-country bands", () => {
     // Royal Mail International Tracked: France and Iceland at 250 g.
     const international = {

@@ -22,7 +22,7 @@ import { CountryBands } from "../../../../components/country-bands"
 import { RateCardEditor } from "../../../../components/rate-card-editor"
 import { api, errorOf, keys } from "../../../../lib/api"
 import { formatPrice } from "../../../../lib/format"
-import { describeBands, emptyForm, formToRateCard, rateCardToForm, type RateCardForm } from "../../../../lib/rate-card-form"
+import { describeBands, describeFreeOver, emptyForm, formToRateCard, rateCardToForm, type RateCardForm } from "../../../../lib/rate-card-form"
 
 const BandSummary = ({ option }: { option: ShippingOptionView }) => {
   const { t } = useTranslation("printTrail")
@@ -41,6 +41,11 @@ const BandSummary = ({ option }: { option: ShippingOptionView }) => {
           {b.upTo === null
             ? t("shipping.bandOpen", { from: b.from, price: formatPrice(b.price, currency) })
             : t("shipping.band", { from: b.from, upTo: b.upTo, price: formatPrice(b.price, currency) })}
+        </Text>
+      ))}
+      {describeFreeOver(option.rate_card).map((f) => (
+        <Text key={f.currency} size="xsmall" leading="compact" className="text-ui-fg-subtle">
+          {t("shipping.freeOverSummary", { amount: formatPrice(f.amount, f.currency) })}
         </Text>
       ))}
       <CountryBands card={option.rate_card} />

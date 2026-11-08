@@ -314,6 +314,82 @@ describe("rate-card admin", () => {
     })
   })
 
+  describe("free_over", () => {
+    const valid = (c: unknown) => {
+      const v = validateRateCard(c, ["tracked"])
+      if (!v.ok) throw new Error("expected a valid card")
+      return v.card
+    }
+    const base = { id: "so_1", name: "UK", price_type: "calculated" }
+    const methods = ["tracked"]
+    const guard = (data: unknown, stored?: Record<string, unknown> | null) => {
+      const r = guardShippingOptionData({ providerId: PRINT_TRAIL_PROVIDER_ID, data, stored, methods })
+      return r.ok ? [] : r.issues.map((i) => `${i.path}: ${i.message}`)
+    }
+
+    it("validates and stores thresholds with the card", () => {
+      const c = valid({ ...card, free_over: { GBP: 40 } })
+      expect(rateCardData(c).free_over).toEqual({ gbp: 40 })
+      const input = createInput({ name: "UK", service_zone_id: "serzo_1", shipping_profile_id: "sp_1" }, c)
+      expect(input.data).toMatchObject({ free_over: { gbp: 40 } })
+      expect(rateCardData(valid(card))).not.toHaveProperty("free_over")
+      const bad = validateRateCard({ ...card, free_over: { gbp: -5 } }, ["tracked"])
+      expect(!bad.ok && bad.issues.map((i) => i.path)).toEqual(["free_over.gbp"])
+    })
+
+    // Medusa merges data on update: a currency left out of the new card
+    // would keep its threshold, so the update writes null over it.
+    it("replaces the stored thresholds on update", () => {
+      const stored = rateCardData(valid({ ...card, free_over: { gbp: 40, eur: 45 } }))
+      expect(updateData(stored, valid({ ...card, free_over: { gbp: 50 } })).free_over).toEqual({ gbp: 50, eur: null })
+      expect(updateData(stored, valid(card)).free_over).toBeNull()
+      expect(updateData(stored, valid({ ...card, free_over: { gbp: 40, eur: 45 } })).free_over).toEqual({ gbp: 40, eur: 45 })
+      expect(updateData(rateCardData(valid(card)), valid(card))).not.toHaveProperty("free_over")
+      expect(updateData(null, valid({ ...card, free_over: { gbp: 40 } })).free_over).toEqual({ gbp: 40 })
+      // Both maps at once.
+      const fr = [{ max_weight: null, prices: { gbp: 9 } }]
+      const both = rateCardData(valid({ ...card, countries: { fr }, free_over: { gbp: 40 } }))
+      expect(updateData(both, valid(card))).toMatchObject({ countries: null, free_over: null })
+    })
+
+    it("guards Medusa's own route on thresholds, checking the merged card", () => {
+      const stored = rateCardData(valid({ ...card, free_over: { gbp: 40 } }))
+      expect(guard({ free_over: { gbp: 30 } }, stored)).toEqual([])
+      expect(guard({ free_over: { gbp: null } }, stored)).toEqual([])
+      expect(guard({ free_over: { gbp: -1 } }, stored)).toEqual(["free_over.gbp: Too small: expected number to be >=0"])
+      // Merged, GBP would sit beside the stored gbp.
+      expect(guard({ free_over: { GBP: 30 } }, stored)).toEqual([
+        "free_over.GBP: gbp has more than one free-delivery threshold",
+        'free_over.GBP: Use a lower-case currency code here ("gbp"): Medusa stores the card as sent',
+      ])
+      expect(guard({ free_over: { EUR: null } }, stored)).toEqual([
+        'free_over.EUR: This card has no free-delivery threshold in "EUR" to remove (currency codes are matched exactly)',
+      ])
+      // Over an option with no card, or on create, there is nothing to join.
+      for (const from of [null, { id: "tracked", name: "Tracked", method: "tracked" }]) {
+        expect(guard({ free_over: { gbp: 40 } }, from)).toEqual([
+          "free_over: free_over needs a rate card to join: send method, currency_code and bands with it, or update an option that has a card",
+        ])
+      }
+      for (const body of ['{"free_over":{"constructor":1,"gbp":30}}', '{"free_over":{"__proto__":{"x":1}}}', '{"free_over":{"prototype":1}}']) {
+        const issues = guard(JSON.parse(body), stored)
+        expect([body, issues.some((i) => /isn't allowed in a rate card/.test(i))]).toEqual([body, true])
+      }
+    })
+
+    it("shows thresholds on the option view, valid or not", () => {
+      expect(toShippingOptionView({ ...base, data: { ...card, free_over: { gbp: 40 } } }, ["tracked"]).rate_card?.free_over).toEqual({ gbp: 40 })
+      expect(toShippingOptionView({ ...base, data: card }, ["tracked"]).rate_card).not.toHaveProperty("free_over")
+      const invalid = toShippingOptionView({ ...base, data: { ...card, method: "air", free_over: { GBP: 40, eur: null } } }, ["tracked"])
+      expect(invalid.card_issue).toBe("invalid")
+      expect(invalid.rate_card?.free_over).toEqual({ GBP: 40 })
+    })
+
+    it("treats free_over alone as a rate card", () => {
+      expect(looksLikeRateCard({ free_over: { gbp: 40 } })).toBe(true)
+    })
+  })
+
   it("keeps prices as entered", () => {
     const valid = validateRateCard(card, ["tracked"])
     if (!valid.ok) throw new Error("expected a valid card")

@@ -4,6 +4,8 @@ export type SweepSteps = {
   // First: the refetches it schedules are due for dueRetries.
   confirmedElsewhere(): Promise<void>
   dueRetries(): Promise<void>
+  // Under confirmOn order.placed: rows held for a payment capture.
+  awaitingPayment(): Promise<void>
   missedOrders(): Promise<void>
   pendingStock(): Promise<void>
   skuChecks(): Promise<void>
@@ -15,6 +17,7 @@ export async function runSweepSteps(steps: SweepSteps, logger: { error(msg: stri
   const order: (keyof SweepSteps)[] = [
     "confirmedElsewhere",
     "dueRetries",
+    "awaitingPayment",
     "missedOrders",
     "pendingStock",
     "skuChecks",

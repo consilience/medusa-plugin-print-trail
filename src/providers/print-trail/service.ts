@@ -8,7 +8,7 @@ import type {
   ValidateFulfillmentDataContext,
 } from "@medusajs/framework/types"
 import { isConnected, resolveCredentials, type PrintTrailCredentials } from "../../config"
-import { bandsFor, cartWeight, countryName, FALLBACK_METHODS, priceForWeight, rateCardSchema } from "../../lib/rate-card"
+import { bandsFor, cartWeight, countryName, FALLBACK_METHODS, priceFor, rateCardSchema, readTotal } from "../../lib/rate-card"
 import { PrintTrailClient } from "../../modules/printTrail/client/client"
 import { isCartOptionListing } from "./pricing-context"
 
@@ -117,7 +117,14 @@ export class PrintTrailFulfillmentService extends AbstractFulfillmentProviderSer
     // 2.22.1, and a draft order's from 2.20). No address yet, or no country:
     // the default bands.
     const country = context.shipping_address?.country_code?.toLowerCase() || null
-    const amount = priceForWeight(card, grams, currency, country)
+    // Free over the card's threshold, compared with the cart's item_total
+    // (items after discounts, tax included, the whole cart, in the cart's
+    // currency). The option listing (adding a method, the cart refresh)
+    // carries it; /calculate does only when the store registers
+    // printTrailCalculatedShippingContext (2.20.0+), and an order's or a draft
+    // order's option never does, so those show the band price.
+    const itemTotal = readTotal((context as { item_total?: unknown }).item_total)
+    const amount = priceFor(card, { grams, currency, country, itemTotal })
     if (amount === null) {
       // Above the last band (a 2 kg limit abroad, say): checkout
       // can't use the option.

@@ -65,3 +65,8 @@ export {
   dismissPrintTrailAttentionWorkflowId,
   type DismissPrintTrailAttentionInput,
 } from "./dismiss-print-trail-attention"
+export {
+  updatePrintTrailSettingsWorkflow,
+  updatePrintTrailSettingsWorkflowId,
+  type UpdatePrintTrailSettingsInput,
+} from "./update-print-trail-settings"

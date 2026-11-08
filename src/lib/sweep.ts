@@ -86,3 +86,52 @@ export function ordersMissingCancel(
 export function withinLookback(createdAt: Date | string | null | undefined, now: Date, lookbackDays: number): boolean {
   return !!createdAt && new Date(createdAt) >= sweepWindow(now, lookbackDays).from
 }
+
+export const AWAITING_PAYMENT = "awaiting-payment"
+
+type AwaitingRow = {
+  order_id: string
+  sequence: number
+  block_reason?: string | null
+  confirmed_at?: Date | string | null
+  pending_action?: string | null
+  cancel_status?: string | null
+  cancel_requested?: boolean | null
+  status?: string | null
+}
+
+// Rows the confirm gate held for a payment capture, to send again now that
+// orders are confirmed when placed: an unpaid order has no capture to run
+// it. The send's gate then decides, by the setting in force. placedSince:
+// when the admin made the switch (the confirmOn record's placed_since); only
+// orders placed before it, which the admin was asked to confirm, are picked.
+// A switch in the plugin options records none, and those orders wait for
+// their Resend as before. Only orders created within the lookback window:
+// an old unpaid order isn't printed because a setting changed (its Resend
+// sends it). Rows with a pending action, a cancel or a confirmation are left
+// alone.
+export function awaitingPaymentRows<T extends AwaitingRow>(
+  rows: T[],
+  orders: { id: string; created_at?: Date | string | null }[],
+  now: Date,
+  lookbackDays: number,
+  placedSince: Date
+): { order_id: string; sequence: number }[] {
+  const recent = new Set(
+    orders
+      .filter((o) => withinLookback(o.created_at, now, lookbackDays) && new Date(o.created_at!) < placedSince)
+      .map((o) => o.id)
+  )
+  return rows
+    .filter(
+      (r) =>
+        r.block_reason === AWAITING_PAYMENT &&
+        !r.confirmed_at &&
+        !r.pending_action &&
+        !r.cancel_status &&
+        !r.cancel_requested &&
+        r.status !== "cancelled" &&
+        recent.has(r.order_id)
+    )
+    .map((r) => ({ order_id: r.order_id, sequence: r.sequence }))
+}

@@ -2,11 +2,20 @@ import type { MedusaContainer } from "@medusajs/framework/types"
 import { ContainerRegistrationKeys, Modules } from "@medusajs/framework/utils"
 import { ACCESS_SKIPPED, accessRefusedNow, refusalWatch } from "../lib/auth-state"
 import { PRINT_TRAIL_PROVIDER_ID, shippingOptionIds } from "../lib/lines"
+import { confirmOnPlacedSince } from "../lib/settings"
 import { runSkuCheckQueue } from "../lib/sku-check-queue"
 import { STATE_KEYS } from "../lib/stock"
 import { runLegacyMetadataScan } from "../lib/stock-flow"
 import { describeStockResult, requestStockSync } from "../lib/stock-request"
-import { dueCancels, dueRows, findOrdersMissingRows, ordersMissingCancel, sweepWindow } from "../lib/sweep"
+import {
+  AWAITING_PAYMENT,
+  awaitingPaymentRows,
+  dueCancels,
+  dueRows,
+  findOrdersMissingRows,
+  ordersMissingCancel,
+  sweepWindow,
+} from "../lib/sweep"
 import { runSweepSteps } from "../lib/sweep-steps"
 import { scheduleConfirmationRefetches } from "../lib/sync-flow"
 import { PRINT_TRAIL_MODULE } from "../modules/printTrail"
@@ -93,6 +102,7 @@ export default async function printTrailSweepJob(container: MedusaContainer) {
     {
       confirmedElsewhere: unlessStopped(scheduleConfirmedElsewhere),
       dueRetries: unlessStopped(runDueRetries),
+      awaitingPayment: unlessStopped(sendAwaitingPayment),
       missedOrders: unlessStopped(sendMissedOrders),
       pendingStock: unlessStopped(runPendingStockSync),
       skuChecks: unlessStopped(runQueuedSkuChecks),
@@ -152,6 +162,36 @@ export default async function printTrailSweepJob(container: MedusaContainer) {
           logger.error(`Print Trail sweep: amend for order ${row.order_id} failed: ${(e as Error).message}`)
         }
       }
+    }
+  }
+
+  // 1b. With orders confirmed when placed after a switch made in the admin
+  // (the confirmOn record's placed_since), the rows held for a capture from
+  // orders placed before the switch are sent again; the gate confirms them,
+  // or records what else holds them. A switch in the plugin options records
+  // no time, so nothing runs: those orders wait for their Resend.
+  async function sendAwaitingPayment() {
+    if (options.confirmOn !== "order.placed") return
+    const placedSince = confirmOnPlacedSince(await service.readSettingRecords())
+    if (!placedSince) return
+    // Rows older than the window can't belong to an order inside it; the
+    // orders' own created_at below decides.
+    const rows = await service.listPrintTrailOrders({
+      block_reason: AWAITING_PAYMENT,
+      confirmed_at: null,
+      created_at: { $gte: sweepWindow(now, options.reconcile.lookbackDays).from },
+    })
+    if (!rows.length) return
+    const { data: orders } = await query.graph({
+      entity: "order",
+      fields: ["id", "created_at"],
+      filters: { id: [...new Set(rows.map((r) => r.order_id))] },
+    })
+    const due = awaitingPaymentRows(rows, orders as { id: string; created_at: Date }[], now, options.reconcile.lookbackDays, placedSince)
+    if (due.length) logger.info(`Print Trail sweep: confirming ${due.length} order(s) held for payment, as orders are now confirmed when placed`)
+    for (const row of due) {
+      if (await stop()) return
+      await send(row.order_id, row.sequence)
     }
   }
 

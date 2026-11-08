@@ -25,8 +25,10 @@
 // Mistaking /calculate for the listing would answer it with no amount, which
 // a storefront might show as free; so every one of the listing's fields must
 // be there. A store adding pricing context to /calculate (the
-// setCalculatedShippingPricingContext hook from 2.20.0, say) adds a currency
-// or a region, not the cart's totals. The HTTP harness (rates.spec.ts) pins
+// setCalculatedShippingPricingContext hook from 2.20.0) may add item_total
+// through the plugin's printTrailCalculatedShippingContext, for free_over;
+// that helper adds nothing else, so total and sales_channel_id are still
+// missing there. The HTTP harness (rates.spec.ts) pins
 // both paths, so a Medusa upgrade that changes either context fails CI.
 const LISTING_ONLY_FIELDS = ["sales_channel_id", "currency_code", "region_id", "item_total", "total"] as const
 

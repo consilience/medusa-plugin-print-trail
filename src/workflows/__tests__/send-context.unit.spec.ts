@@ -13,6 +13,30 @@ describe("buildSendContext", () => {
     expect(service.markPreOrderSeen).toHaveBeenCalledWith(["PRE-1"])
   })
 
+  it("reads the options past the settings cache when asked (the confirm gate)", async () => {
+    const service = {
+      getClient: jest.fn(async () => ({})),
+      getOptions: jest.fn(async () => ({ confirmOn: "payment.captured" })),
+      getFreshOptions: jest.fn(async () => ({ confirmOn: "order.placed" })),
+    }
+    const container = { resolve: (key: string) => ({ [PRINT_TRAIL_MODULE]: service, [ContainerRegistrationKeys.LINK]: {} })[key] }
+    expect((await buildSendContext(container as never)).options).toEqual({ confirmOn: "payment.captured" })
+    expect((await buildSendContext(container as never, { freshOptions: true })).options).toEqual({ confirmOn: "order.placed" })
+    expect(service.getFreshOptions).toHaveBeenCalledTimes(1)
+  })
+
+  it("fails the gate's context when the settings can't be read, rather than using older options", async () => {
+    const service = {
+      getClient: jest.fn(async () => ({})),
+      getOptions: jest.fn(async () => ({ confirmOn: "order.placed" })),
+      getFreshOptions: jest.fn(async () => {
+        throw new Error("db down")
+      }),
+    }
+    const container = { resolve: (key: string) => ({ [PRINT_TRAIL_MODULE]: service, [ContainerRegistrationKeys.LINK]: {} })[key] }
+    await expect(buildSendContext(container as never, { freshOptions: true })).rejects.toThrow("db down")
+  })
+
   it("links each new row to its order", async () => {
     const service = {
       createPrintTrailOrders: jest.fn(async (data) => ({ id: "ptord_1", ...data })),

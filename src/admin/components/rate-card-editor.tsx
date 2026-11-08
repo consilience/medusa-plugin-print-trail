@@ -1,7 +1,7 @@
 import { Button, Hint, Input, Label, Select, Text } from "@medusajs/ui"
 import { useTranslation } from "react-i18next"
 import type { ShippingOptionChoices } from "../../lib/admin-types"
-import { removeCountry, type RateCardForm } from "../lib/rate-card-form"
+import { freeOverCurrencies, removeCountry, type RateCardForm } from "../lib/rate-card-form"
 import { CountryBands } from "./country-bands"
 
 type Props = {
@@ -170,6 +170,36 @@ export const RateCardEditor = ({ form, onChange, errors, choices, scopeLocked, d
           </Button>
         </div>
       </div>
+
+      {freeOverCurrencies(form).length > 0 && (
+        <div className="flex flex-col gap-y-2">
+          <Label size="small" weight="plus">
+            {t("shipping.freeOver")}
+          </Label>
+          <Text size="small" leading="compact" className="text-ui-fg-subtle">
+            {t("shipping.freeOverHint")}
+          </Text>
+          {freeOverCurrencies(form).map((code) => (
+            <div key={code} className="grid grid-cols-[4rem_1fr] items-start gap-2">
+              <Text size="small" leading="compact" className="pt-1.5">
+                {code.toUpperCase()}
+              </Text>
+              <div className="flex flex-col gap-y-1">
+                <Input
+                  size="small"
+                  inputMode="decimal"
+                  aria-label={t("shipping.freeOverIn", { currency: code.toUpperCase() })}
+                  placeholder={t("shipping.freeOverNone")}
+                  value={form.free_over?.[code] ?? ""}
+                  disabled={disabled}
+                  onChange={(e) => set({ free_over: { ...form.free_over, [code]: e.target.value } })}
+                />
+                <FieldError error={errors[`free_over.${code}`]} />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {form.countries && Object.keys(form.countries).length > 0 && (
         <div className="flex flex-col gap-y-2">

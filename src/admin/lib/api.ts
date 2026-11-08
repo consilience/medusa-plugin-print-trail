@@ -8,6 +8,11 @@ import type {
   RotateResult,
   RefreshResult,
   ResendResult,
+  ConfirmReasonDto,
+  SaveSettingsResult,
+  SettingKeyDto,
+  SettingsView,
+  SettingValueDto,
   ShippingOptionChoices,
   ShippingOptionView,
   SkuHealthView,
@@ -21,6 +26,7 @@ import { sdk } from "./sdk"
 export const keys = {
   all: ["print-trail"] as const,
   connection: ["print-trail", "connection"] as const,
+  settings: ["print-trail", "settings"] as const,
   shippingOptions: ["print-trail", "shipping-options"] as const,
   order: (id: string) => ["print-trail", "order", id] as const,
   attentionAll: ["print-trail", "attention"] as const,
@@ -57,6 +63,14 @@ export const api = {
   skuHealth: () => sdk.client.fetch<SkuHealthView>(`${base}/sku-health`),
   syncStockNow: () => sdk.client.fetch<StockSyncNowView>(`${base}/stock-sync`, { method: "POST", body: {} }),
   variant: (id: string) => sdk.client.fetch<VariantView>(`${base}/variants/${id}`),
+  settings: () => sdk.client.fetch<SettingsView>(`${base}/settings`),
+  saveSettings: (values: Partial<Record<SettingKeyDto, SettingValueDto>>, confirm: ConfirmReasonDto[] = []) =>
+    sdk.client.fetch<SaveSettingsResult>(`${base}/settings`, { method: "POST", body: { values, confirm } }),
+  resetSetting: (key: SettingKeyDto, confirm: ConfirmReasonDto[] = []) =>
+    sdk.client.fetch<SaveSettingsResult>(`${base}/settings/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+      query: confirm.length ? { confirm: confirm.join(",") } : undefined,
+    }),
 }
 
 // The JS SDK's FetchError carries the status and the body's `message` only;
